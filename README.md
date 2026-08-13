@@ -9,8 +9,9 @@ Python wrapper for the [RouterAI](https://routerai.ru) API — unified access to
   supports both; transports are kept separate)
 - Parsed responses: content, reasoning, tool calls, alternatives, token usage and cost
   in rubles (`Decimal`)
-- Streaming (SSE) with per-chunk deltas; typed `StreamInterruptedError` on mid-stream
-  failures, no unsafe automatic retries after the first chunk
+- Streaming (SSE) with per-chunk deltas; once a successful response stream is opened
+  no automatic retries happen (even if 0 chunks arrived), mid-stream failures raise a
+  typed `StreamInterruptedError`
 - Models catalog: listing, client-side search, grouping by capabilities (text, reasoning,
   vision, image/video/audio generation, speech, transcription, embeddings, rerank, tools)
 - Post-hoc cost lookup by generation id (`X-Generation-Id`)
@@ -81,6 +82,12 @@ async for chunk in client.chat.astream(...):
 await client.aclose()
 ```
 
+Sync and async transports live in separate slots, so one instance can serve both
+modes. Note the lifecycle: `close()` closes the sync connection pool, `await
+aclose()` closes the async one. If a single instance was used from both modes,
+call both. External transports injected via `http_client`/`async_http_client`
+are never closed by the library.
+
 ## Configuration
 
 | Option | Description |
@@ -108,7 +115,7 @@ Retries honour the `Retry-After` header. Safe methods (GET/HEAD) are retried on
 | `NoProviderError` | 503 with "no provider available" |
 | `APIStatusError` | other 4xx/5xx (has `.status_code`, `.body`) |
 | `RequestError` | transport failure after retries |
-| `StreamInterruptedError` | SSE broke after chunks were already delivered |
+| `StreamInterruptedError` | SSE broke after the response stream was opened (`.chunks_received` may be 0) |
 
 ## Logging
 

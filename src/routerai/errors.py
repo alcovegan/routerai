@@ -45,10 +45,12 @@ class RequestError(RouterAIError):
 
 
 class StreamInterruptedError(RouterAIError):
-    """Raised when a streaming response breaks after data was already delivered.
+    """Raised when a streaming response breaks after it was already opened.
 
-    No automatic retry is attempted in this state: the request may have been
-    billed and retrying could duplicate the generation.
+    Retries stop as soon as a successful HTTP response stream is opened —
+    even before the first SSE chunk — because the request may have been
+    billed and retrying could duplicate the generation. ``chunks_received``
+    can therefore legitimately be 0.
     """
 
     def __init__(self, message: str, *, chunks_received: int = 0) -> None:
