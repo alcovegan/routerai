@@ -70,6 +70,8 @@ def _error_message(response: httpx.Response) -> str:
     For HTTP 200 responses only JSON error payloads count — plain-text or
     binary 200 bodies (e.g. TTS audio) are not errors.
     """
+    if response.status_code < 400 and "json" not in response.headers.get("content-type", ""):
+        return ""
     body = _response_body(response)
     message = _parse_error_payload(body)
     if not message and isinstance(body, str) and response.status_code >= 400:
@@ -139,6 +141,8 @@ class HTTPClient:
             async_http_client = http_client
             http_client = None
 
+        self._validate_config(timeout, max_retries, retry_backoff)
+
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
@@ -169,6 +173,21 @@ class HTTPClient:
     @property
     def logger(self) -> logging.Logger:
         return self._logger
+
+    @staticmethod
+    def _validate_config(timeout: float, max_retries: int, retry_backoff: float) -> None:
+        import math
+
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ConfigurationError(f"timeout must be a positive finite number, got {timeout!r}")
+        if not isinstance(max_retries, int) or isinstance(max_retries, bool) or max_retries < 0:
+            raise ConfigurationError(
+                f"max_retries must be a non-negative integer, got {max_retries!r}"
+            )
+        if not math.isfinite(retry_backoff) or retry_backoff < 0:
+            raise ConfigurationError(
+                f"retry_backoff must be a non-negative finite number, got {retry_backoff!r}"
+            )
 
     def _ensure_sync_client(self) -> httpx.Client:
         if self._sync_client is None:
@@ -230,15 +249,19 @@ class HTTPClient:
         await asyncio.sleep(self._retry_backoff * (2**attempt) * jitter)
 
     def _log_result(self, response: httpx.Response, method: str, url: str, elapsed: float) -> None:
+        if not self._logger.isEnabledFor(logging.INFO):
+            return
         tokens = cost = None
-        try:
-            payload = response.json()
-            usage = payload.get("usage")
-            if isinstance(usage, dict):
-                tokens = usage.get("total_tokens")
-                cost = usage.get("cost")
-        except ValueError:
-            pass
+        content_type = response.headers.get("content-type", "")
+        if "json" in content_type:
+            try:
+                payload = response.json()
+                usage = payload.get("usage")
+                if isinstance(usage, dict):
+                    tokens = usage.get("total_tokens")
+                    cost = usage.get("cost")
+            except ValueError:
+                pass
         log_request(
             self._logger,
             method,
@@ -495,10 +518,11 @@ class HTTPClient:
                         elapsed=time.monotonic() - started,
                         status=response.status_code,
                     )
-                    _raise_for_status(
-                        response,
-                        _error_message(response) if response.status_code >= 400 else "",
-                    )
+                    if response.status_code >= 400:
+                        # read the (async) body before mapping so the sync
+                        # text/json accessors work on unread streams too
+                        await response.aread()
+                        _raise_for_status(response, _error_message(response))
                     yielded = True
                     yield response
                     return
