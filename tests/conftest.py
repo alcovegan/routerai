@@ -1,0 +1,74 @@
+from __future__ import annotations
+
+import httpx
+import pytest
+
+CATALOG = [
+    {
+        "id": "deepseek/deepseek-v4-pro",
+        "name": "DeepSeek: DeepSeek V4 Pro",
+        "created": 1777000679,
+        "description": "DeepSeek V4 Pro MoE reasoning model",
+        "context_length": 1000000,
+        "architecture": {
+            "modality": "text->text",
+            "tokenizer": "DeepSeek",
+            "instruct_type": None,
+            "input_modalities": ["text"],
+            "output_modalities": ["text"],
+        },
+        "pricing": {"prompt": 0.000065, "completion": 0.000131},
+        "per_request_limits": None,
+        "supported_parameters": ["temperature", "tools", "include_reasoning"],
+        "default_parameters": None,
+    },
+    {
+        "id": "openai/gpt-image-1",
+        "name": "OpenAI: GPT Image 1",
+        "created": 1720000000,
+        "description": "Image generation model",
+        "context_length": None,
+        "architecture": {
+            "modality": "text->image",
+            "tokenizer": None,
+            "instruct_type": None,
+            "input_modalities": ["text"],
+            "output_modalities": ["image"],
+        },
+        "pricing": {"prompt": None, "completion": 0.04},
+        "per_request_limits": None,
+        "supported_parameters": None,
+        "default_parameters": None,
+    },
+    {
+        "id": "anthropic/claude-sonnet-5",
+        "name": "Anthropic: Claude Sonnet 5",
+        "created": 1780000000,
+        "description": "Vision model with tools",
+        "context_length": 1000000,
+        "architecture": {
+            "modality": "text+image->text",
+            "tokenizer": "Claude",
+            "instruct_type": None,
+            "input_modalities": ["text", "image"],
+            "output_modalities": ["text"],
+        },
+        "pricing": {"prompt": 0.000215, "completion": 0.001078},
+        "per_request_limits": None,
+        "supported_parameters": ["temperature", "tools"],
+        "default_parameters": {},
+    },
+]
+
+
+def httpx_response(payload, status_code: int = 200, headers: dict | None = None) -> httpx.Response:
+    if isinstance(payload, bytes):
+        return httpx.Response(status_code, content=payload, headers=headers)
+    return httpx.Response(status_code, json=payload, headers=headers)
+
+
+@pytest.fixture()
+def catalog_route(respx_mock):
+    return respx_mock.get("https://routerai.ru/api/v1/models").mock(
+        return_value=httpx_response({"data": CATALOG})
+    )
