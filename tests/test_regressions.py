@@ -1174,3 +1174,14 @@ def test_video_save_streams_to_file(respx_mock, tmp_path):
         assert handle.read() == b"mp4-content"
     assert not (tmp_path / ".out.mp4.part").exists()
     client.close()
+
+
+# --- audit 4 wave: network-deny gate ---
+
+
+def test_network_guard_blocks_real_sockets():
+    import socket
+
+    with pytest.raises(Exception) as exc_info:
+        socket.create_connection(("routerai.ru", 443), timeout=0.1)
+    assert "socket" in type(exc_info.value).__name__.lower()

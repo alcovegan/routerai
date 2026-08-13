@@ -94,3 +94,22 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if "live" in item.keywords:
             item.add_marker(skip)
+
+
+@pytest.fixture(autouse=True)
+def _network_guard(request):
+    """Block real sockets for every non-live test (second hermeticity layer).
+
+    Unix sockets stay enabled: asyncio's selector event loop uses
+    ``socket.socketpair()`` for its self-pipe on Python 3.14.
+    """
+    import pytest_socket
+
+    if "live" in request.node.keywords:
+        yield
+        return
+    pytest_socket.disable_socket(allow_unix_socket=True)
+    try:
+        yield
+    finally:
+        pytest_socket.enable_socket()
