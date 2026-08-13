@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import math
 import time
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from .._extras import merge_extra
 from ..errors import RouterAIError, VideoGenerationError
@@ -17,6 +18,15 @@ _POLL_STATUSES = {"pending", "processing", "running", "in_progress", "queued"}
 _TERMINAL_FAILURES = {"failed", "cancelled", "expired"}
 
 
+def _validate_public_url(value: str) -> str:
+    """RouterAI image inputs accept public HTTPS URLs or data URIs only."""
+    if value.startswith("data:"):
+        return value
+    if not value.startswith("https://"):
+        raise ValueError(f"image url must be a public https url or a data uri, got {value[:60]!r}")
+    return value
+
+
 class FrameImage(BaseModel):
     """Reference frame for image-to-video (``frame_images``).
 
@@ -24,10 +34,15 @@ class FrameImage(BaseModel):
     ``last_frame`` (the video ends on this frame).
     """
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     url: str
-    frame_type: str = "first_frame"
+    frame_type: Literal["first_frame", "last_frame"] = "first_frame"
+
+    @field_validator("url")
+    @classmethod
+    def _url(cls, value: str) -> str:
+        return _validate_public_url(value)
 
     def model_dump_wire(self) -> dict[str, Any]:
         return {
@@ -40,9 +55,14 @@ class FrameImage(BaseModel):
 class ImageReference(BaseModel):
     """Style/character reference for reference-to-video (``input_references``)."""
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     url: str
+
+    @field_validator("url")
+    @classmethod
+    def _url(cls, value: str) -> str:
+        return _validate_public_url(value)
 
     def model_dump_wire(self) -> dict[str, Any]:
         return {"type": "image_url", "image_url": {"url": self.url}}
@@ -84,13 +104,13 @@ class VideoTask:
     def cost_rub(self) -> Decimal | None:
         return self._usage.cost_rub if self._usage else None
 
-    def refresh(self) -> VideoTask:
-        response = self._http.get(f"videos/{self.id}")
+    def refresh(self, *, timeout: float | None = None) -> VideoTask:
+        response = self._http.get(f"videos/{self.id}", timeout=timeout)
         self._apply(self._http._json(response))
         return self
 
-    async def arefresh(self) -> VideoTask:
-        response = await self._http.aget(f"videos/{self.id}")
+    async def arefresh(self, *, timeout: float | None = None) -> VideoTask:
+        response = await self._http.aget(f"videos/{self.id}", timeout=timeout)
         self._apply(self._http._json(response))
         return self
 
@@ -102,27 +122,93 @@ class VideoTask:
     def failed(self) -> bool:
         return self.status in _TERMINAL_FAILURES
 
-    def content(self) -> bytes:
-        """Download the generated video (``GET /videos/{id}/content``)."""
-        return self._http.get(f"videos/{self.id}/content").content
+    def content(self, *, index: int = 0, timeout: float | None = None) -> bytes:
+        """Download one generated video (``GET /videos/{id}/content?index=N``)."""
+        self._validate_index(index)
+        response = self._http.get(
+            f"videos/{self.id}/content", params={"index": index}, timeout=timeout
+        )
+        return response.content
 
-    async def acontent(self) -> bytes:
-        return (await self._http.aget(f"videos/{self.id}/content")).content
+    async def acontent(self, *, index: int = 0, timeout: float | None = None) -> bytes:
+        self._validate_index(index)
+        response = await self._http.aget(
+            f"videos/{self.id}/content", params={"index": index}, timeout=timeout
+        )
+        return response.content
 
-    def save(self, path: str) -> str:
+    def _validate_index(self, index: int) -> None:
+        if index < 0:
+            raise ValueError(f"index must be >= 0, got {index!r}")
+        if self.urls and index >= len(self.urls):
+            raise ValueError(f"index {index} out of range: task has {len(self.urls)} output(s)")
+
+    def save(
+        self,
+        path: str,
+        *,
+        index: int = 0,
+        timeout: float | None = None,
+        max_bytes: int = 512 * 1024 * 1024,
+    ) -> str:
+        """Stream one video output to ``path`` atomically (temp file + rename)."""
+        import os
         import pathlib
 
+        self._validate_index(index)
         target = pathlib.Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(self.content())
+        tmp = target.with_name(f".{target.name}.part")
+        total = 0
+        with (
+            self._http.stream_request(
+                "GET", f"videos/{self.id}/content", params={"index": index}, timeout=timeout
+            ) as response,
+            tmp.open("wb") as handle,
+        ):
+            for chunk in response.iter_bytes():
+                total += len(chunk)
+                if total > max_bytes:
+                    tmp.unlink(missing_ok=True)
+                    raise RouterAIError(f"video exceeds the {max_bytes} byte save limit")
+                handle.write(chunk)
+        os.replace(tmp, target)
         return str(target)
 
-    async def asave(self, path: str) -> str:
+    async def asave(
+        self,
+        path: str,
+        *,
+        index: int = 0,
+        timeout: float | None = None,
+        max_bytes: int = 512 * 1024 * 1024,
+    ) -> str:
+        """Async variant of :meth:`save` (file writes run off the event loop)."""
+        import asyncio
+        import os
         import pathlib
 
+        self._validate_index(index)
         target = pathlib.Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(await self.acontent())
+        tmp = target.with_name(f".{target.name}.part")
+        total = 0
+
+        def write_chunk(chunk: bytes) -> None:
+            nonlocal total
+            with tmp.open("ab") as handle:
+                handle.write(chunk)
+            total += len(chunk)
+
+        async with self._http.astream_request(
+            "GET", f"videos/{self.id}/content", params={"index": index}, timeout=timeout
+        ) as response:
+            async for chunk in response.aiter_bytes():
+                await asyncio.to_thread(write_chunk, chunk)
+                if total > max_bytes:
+                    await asyncio.to_thread(tmp.unlink, True)
+                    raise RouterAIError(f"video exceeds the {max_bytes} byte save limit")
+        await asyncio.to_thread(os.replace, tmp, target)
         return str(target)
 
     def wait(
@@ -134,17 +220,23 @@ class VideoTask:
     ) -> VideoTask:
         """Poll until the task leaves the pending state.
 
-        ``timeout`` bounds the total wait time (the sleep is clamped to the
-        remaining budget). With ``raise_on_failure`` a terminal failure
-        raises :class:`VideoGenerationError` instead of returning the task.
+        ``timeout`` bounds the total wait time: the sleep is clamped to the
+        remaining budget and each refresh gets a request timeout capped to
+        the remaining budget too. With ``raise_on_failure`` a terminal
+        failure raises :class:`VideoGenerationError` instead of returning
+        the task.
         """
         self._validate_wait(timeout, interval)
         deadline = time.monotonic() + timeout
         while not self.done:
-            if time.monotonic() >= deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 raise RouterAIError(f"video task {self.id} not finished within {timeout}s")
-            time.sleep(min(interval, max(0.0, deadline - time.monotonic())))
-            self.refresh()
+            time.sleep(min(interval, remaining))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RouterAIError(f"video task {self.id} not finished within {timeout}s")
+            self.refresh(timeout=remaining)
         if self.failed and raise_on_failure:
             raise VideoGenerationError(self.id, self.status, self.error)
         return self
@@ -161,20 +253,24 @@ class VideoTask:
         self._validate_wait(timeout, interval)
         deadline = time.monotonic() + timeout
         while not self.done:
-            if time.monotonic() >= deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 raise RouterAIError(f"video task {self.id} not finished within {timeout}s")
-            await asyncio.sleep(min(interval, max(0.0, deadline - time.monotonic())))
-            await self.arefresh()
+            await asyncio.sleep(min(interval, remaining))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RouterAIError(f"video task {self.id} not finished within {timeout}s")
+            await self.arefresh(timeout=remaining)
         if self.failed and raise_on_failure:
             raise VideoGenerationError(self.id, self.status, self.error)
         return self
 
     @staticmethod
     def _validate_wait(timeout: float, interval: float) -> None:
-        if timeout < 0:
-            raise ValueError(f"timeout must be >= 0, got {timeout!r}")
-        if interval <= 0:
-            raise ValueError(f"interval must be > 0, got {interval!r}")
+        if not math.isfinite(timeout) or timeout < 0:
+            raise ValueError(f"timeout must be a finite number >= 0, got {timeout!r}")
+        if not math.isfinite(interval) or interval <= 0:
+            raise ValueError(f"interval must be a finite number > 0, got {interval!r}")
 
 
 class Videos:
@@ -282,7 +378,33 @@ class Videos:
         callback_url: str | None,
         extra: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        if frame_images and input_references:
+        # normalize inputs first (incl. the deprecated image_input), then
+        # enforce the single input mode over the normalized set
+        normalized_frames: list[FrameImage] | None = None
+        normalized_references: list[ImageReference] | None = None
+        if frame_images:
+            normalized_frames = [
+                item if isinstance(item, FrameImage) else FrameImage.model_validate(item)
+                for item in frame_images
+            ]
+        if input_references:
+            normalized_references = [
+                item if isinstance(item, ImageReference) else ImageReference.model_validate(item)
+                for item in input_references
+            ]
+        if image_input is not None:
+            import warnings
+
+            warnings.warn(
+                "image_input is deprecated; use frame_images=[FrameImage(url=...)] "
+                "for image-to-video instead",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+            normalized_frames = (normalized_frames or []) + [
+                FrameImage(url=image_input, frame_type="first_frame")
+            ]
+        if normalized_frames and normalized_references:
             raise ValueError(
                 "frame_images and input_references are mutually exclusive; "
                 "pick one image-input mode"
@@ -302,35 +424,30 @@ class Videos:
             body["generate_audio"] = generate_audio
         if negative_prompt:
             body["negative_prompt"] = negative_prompt
-        if frame_images:
-            body["frame_images"] = [
-                item.model_dump_wire() if isinstance(item, FrameImage) else dict(item)
-                for item in frame_images
-            ]
-        if input_references:
-            body["input_references"] = [
-                item.model_dump_wire() if isinstance(item, ImageReference) else dict(item)
-                for item in input_references
-            ]
-        if image_input is not None:
-            import warnings
-
-            warnings.warn(
-                "image_input is deprecated; use frame_images=[FrameImage(url=...)] "
-                "for image-to-video instead",
-                DeprecationWarning,
-                stacklevel=3,
-            )
-            body.setdefault("frame_images", []).append(
-                {
-                    "type": "image_url",
-                    "image_url": {"url": image_input},
-                    "frame_type": "first_frame",
-                }
-            )
+        if normalized_frames:
+            body["frame_images"] = [item.model_dump_wire() for item in normalized_frames]
+        if normalized_references:
+            body["input_references"] = [item.model_dump_wire() for item in normalized_references]
         if callback_url:
             body["callback_url"] = callback_url
-        merge_extra(extra, reserved=("model", "prompt", "frame_images", "input_references"))
+        merge_extra(
+            extra,
+            reserved=(
+                "model",
+                "prompt",
+                "aspect_ratio",
+                "duration",
+                "resolution",
+                "size",
+                "seed",
+                "generate_audio",
+                "negative_prompt",
+                "frame_images",
+                "input_references",
+                "image_input",
+                "callback_url",
+            ),
+        )
         if extra:
             body.update(extra)
         return body
