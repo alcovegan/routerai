@@ -12,8 +12,10 @@ from .errors import (
     RequestError,
     RouterAIError,
     StreamInterruptedError,
+    VideoGenerationError,
 )
 from .registry import Registry
+from .resources.videos import FrameImage, ImageReference
 from .schemas import (
     Architecture,
     Capability,
@@ -38,6 +40,8 @@ __all__ = [
     "ChatResult",
     "ConfigurationError",
     "Endpoint",
+    "FrameImage",
+    "ImageReference",
     "InsufficientFundsError",
     "Model",
     "ModelDetail",
@@ -56,5 +60,6 @@ __all__ = [
     "StreamInterruptedError",
     "ToolCall",
     "Usage",
+    "VideoGenerationError",
     "__version__",
 ]
