@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import os
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO
@@ -15,8 +16,8 @@ SUPPORTED_AUDIO_FORMATS = {"mp3", "wav", "flac", "m4a", "ogg", "webm", "aac"}
 _SUFFIX_FORMATS = {"mpeg": "mp3", "wave": "wav", "oga": "ogg", "mp4": "m4a"}
 
 
-def _format_from_name(name: str | None) -> str | None:
-    if not name:
+def _format_from_name(name: object) -> str | None:
+    if not isinstance(name, (str, os.PathLike)):
         return None
     suffix = Path(name).suffix.lstrip(".").lower()
     if not suffix:
@@ -169,15 +170,16 @@ class Audio:
         extra: dict[str, Any] | None,
     ) -> dict[str, Any]:
         data, name = _read_audio(file)
-        audio_format = _format_from_name(name)
-        if audio_format is None:
-            if format is None:
+        audio_format: str | None
+        if format is not None:
+            audio_format = format.lower()
+        else:
+            audio_format = _format_from_name(name)
+            if audio_format is None:
                 raise ValueError(
                     "cannot infer audio format from the file name; pass format= explicitly "
                     f"(one of {sorted(SUPPORTED_AUDIO_FORMATS)})"
                 )
-            audio_format = format
-        audio_format = audio_format.lower()
         if audio_format not in SUPPORTED_AUDIO_FORMATS:
             raise ValueError(
                 f"unsupported audio format {audio_format!r}; supported: {sorted(SUPPORTED_AUDIO_FORMATS)}"
