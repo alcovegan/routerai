@@ -2,6 +2,7 @@ from .client import RouterAI
 from .errors import (
     APIStatusError,
     AuthenticationError,
+    ConfigurationError,
     InsufficientFundsError,
     ModelNotFoundError,
     NoProviderError,
@@ -10,6 +11,7 @@ from .errors import (
     RateLimitError,
     RequestError,
     RouterAIError,
+    StreamInterruptedError,
 )
 from .registry import Registry
 from .schemas import (
@@ -34,6 +36,7 @@ __all__ = [
     "AuthenticationError",
     "Capability",
     "ChatResult",
+    "ConfigurationError",
     "Endpoint",
     "InsufficientFundsError",
     "Model",
@@ -50,6 +53,7 @@ __all__ = [
     "RouterAI",
     "RouterAIError",
     "ServiceTier",
+    "StreamInterruptedError",
     "ToolCall",
     "Usage",
     "__version__",
