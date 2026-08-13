@@ -7,6 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO
 
+from .._extras import merge_extra
 from ..schemas import Usage
 
 if TYPE_CHECKING:
@@ -87,6 +88,7 @@ class Audio:
         }
         if speed is not None:
             body["speed"] = speed
+        merge_extra(extra, reserved=("model", "input", "voice", "response_format"))
         if extra:
             body.update(extra)
         return body
@@ -203,6 +205,7 @@ class Audio:
             payload["temperature"] = temperature
         if provider:
             payload["provider"] = provider
+        merge_extra(extra, reserved=("model", "input_audio", "response_format"))
         if extra:
             payload.update(extra)
         return payload

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import base64
+import binascii
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .._extras import merge_extra
+from ..errors import RouterAIError
 from ..schemas import Usage
 
 if TYPE_CHECKING:
@@ -13,16 +16,48 @@ if TYPE_CHECKING:
 
 class GeneratedImage:
     def __init__(
-        self, data: bytes, *, b64: str | None = None, revised_prompt: str | None = None
+        self,
+        data: bytes | None = None,
+        *,
+        b64: str | None = None,
+        url: str | None = None,
+        revised_prompt: str | None = None,
     ) -> None:
         self.data = data
         self.b64 = b64
+        self.url = url
         self.revised_prompt = revised_prompt
 
     def save(self, path: str | Path) -> Path:
+        if self.data is None:
+            raise RouterAIError("image has no inline data; use download() for url images")
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(self.data)
+        return path
+
+    def download(
+        self, path: str | Path, *, timeout: float = 60.0, max_bytes: int = 50 * 1024 * 1024
+    ) -> Path:
+        """Download a url-based image explicitly (HTTPS only, size-limited)."""
+        if not self.url:
+            raise RouterAIError("image has no url; use save() for inline data")
+        if not self.url.startswith("https://"):
+            raise RouterAIError(f"refusing to download non-https url: {self.url!r}")
+        import httpx
+
+        with httpx.stream("GET", self.url, timeout=timeout, follow_redirects=True) as response:
+            response.raise_for_status()
+            chunks: list[bytes] = []
+            total = 0
+            for chunk in response.iter_bytes():
+                total += len(chunk)
+                if total > max_bytes:
+                    raise RouterAIError(f"image exceeds the {max_bytes} byte download limit")
+                chunks.append(chunk)
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"".join(chunks))
         return path
 
 
@@ -94,7 +129,7 @@ class Images:
             extra=extra,
         )
         response = await self._http.apost("images", json=body)
-        return await self._aparse(response)
+        return self._parse(response)
 
     def _body(
         self,
@@ -114,43 +149,32 @@ class Images:
             body["quality"] = quality
         if input_references:
             body["input_references"] = input_references
+        merge_extra(extra, reserved=("model", "prompt", "n"))
         if extra:
             body.update(extra)
         return body
 
+    @staticmethod
+    def _parse_item(item: dict[str, Any]) -> GeneratedImage:
+        revised_prompt = item.get("revised_prompt")
+        b64 = item.get("b64_json")
+        if b64 is not None:
+            if not b64:
+                raise RouterAIError("provider returned an empty b64_json image payload")
+            try:
+                data = base64.b64decode(b64, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise RouterAIError("provider returned a corrupted b64_json image payload") from exc
+            if not data:
+                raise RouterAIError("provider returned an empty b64_json image payload")
+            return GeneratedImage(data, b64=b64, revised_prompt=revised_prompt)
+        url = item.get("url")
+        if url:
+            return GeneratedImage(url=str(url), revised_prompt=revised_prompt)
+        raise RouterAIError(f"image entry has neither b64_json nor url: {item!r}")
+
     def _parse(self, response: Any) -> ImageResult:
         payload = self._http._json(response)
-        images = []
-        for item in payload.get("data") or []:
-            b64 = item.get("b64_json")
-            if b64:
-                images.append(GeneratedImage(base64.b64decode(b64), b64=b64))
-                continue
-            url = item.get("url")
-            if url:
-                import httpx
-
-                fetched = httpx.get(url, timeout=60.0)
-                fetched.raise_for_status()
-                images.append(GeneratedImage(fetched.content))
-        usage = Usage.model_validate(payload["usage"]) if payload.get("usage") else None
-        return ImageResult(images, usage, payload, response.headers.get("X-Generation-Id"))
-
-    async def _aparse(self, response: Any) -> ImageResult:
-        payload = self._http._json(response)
-        images = []
-        for item in payload.get("data") or []:
-            b64 = item.get("b64_json")
-            if b64:
-                images.append(GeneratedImage(base64.b64decode(b64), b64=b64))
-                continue
-            url = item.get("url")
-            if url:
-                import httpx
-
-                async with httpx.AsyncClient(timeout=60.0) as client:
-                    fetched = await client.get(url)
-                fetched.raise_for_status()
-                images.append(GeneratedImage(fetched.content))
+        images = [self._parse_item(item) for item in payload.get("data") or []]
         usage = Usage.model_validate(payload["usage"]) if payload.get("usage") else None
         return ImageResult(images, usage, payload, response.headers.get("X-Generation-Id"))

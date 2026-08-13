@@ -3,6 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+from .._extras import merge_extra
 from ..schemas import Usage
 
 if TYPE_CHECKING:
@@ -26,6 +27,7 @@ class Embeddings:
         body: dict[str, Any] = {"model": model, "input": input}
         if dimensions is not None:
             body["dimensions"] = dimensions
+        merge_extra(extra, reserved=("model", "input"))
         if extra:
             body.update(extra)
         response = self._http.post("embeddings", json=body)
@@ -42,6 +44,7 @@ class Embeddings:
         body: dict[str, Any] = {"model": model, "input": input}
         if dimensions is not None:
             body["dimensions"] = dimensions
+        merge_extra(extra, reserved=("model", "input"))
         if extra:
             body.update(extra)
         response = await self._http.apost("embeddings", json=body)
@@ -86,6 +89,7 @@ class Rerank:
         body: dict[str, Any] = {"model": model, "query": query, "documents": documents}
         if top_n is not None:
             body["top_n"] = top_n
+        merge_extra(extra, reserved=("model", "query", "documents"))
         if extra:
             body.update(extra)
         response = self._http.post("rerank", json=body)
@@ -103,6 +107,7 @@ class Rerank:
         body: dict[str, Any] = {"model": model, "query": query, "documents": documents}
         if top_n is not None:
             body["top_n"] = top_n
+        merge_extra(extra, reserved=("model", "query", "documents"))
         if extra:
             body.update(extra)
         response = await self._http.apost("rerank", json=body)

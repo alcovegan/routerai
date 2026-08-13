@@ -7,13 +7,16 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from ..errors import RouterAIError, StreamInterruptedError
+from .._extras import merge_extra as _merge_extra
+from ..errors import APIStatusError, RouterAIError, StreamInterruptedError
 from ..schemas import ChatResult, ProviderSelection, ServiceTier, Usage
 
 if TYPE_CHECKING:
     from .._http import HTTPClient
 
 MessageInput = dict[str, Any]
+
+RESERVED_BODY_KEYS = ("model", "messages", "stream")
 
 
 def _messages(
@@ -138,6 +141,7 @@ class Chat:
         stop: list[str] | None,
         extra: dict[str, Any] | None,
     ) -> dict[str, Any]:
+        _merge_extra(extra, reserved=RESERVED_BODY_KEYS)
         body: dict[str, Any] = {"model": model, "messages": _messages(prompt, system)}
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
@@ -196,10 +200,13 @@ class Chat:
             service_tier=service_tier,
             provider=provider,
             stop=stop,
-            extra={"stream": True, **(extra or {})},
+            extra=extra,
         )
+        body["stream"] = True
         with self._http.stream_request("POST", "chat/completions", json=body) as response:
-            yield from _iter_sse(response, http=self._http)
+            yield from _iter_sse(
+                response, http=self._http, generation_id=response.headers.get("X-Generation-Id")
+            )
 
     async def astream(
         self,
@@ -230,18 +237,26 @@ class Chat:
             service_tier=service_tier,
             provider=provider,
             stop=stop,
-            extra={"stream": True, **(extra or {})},
+            extra=extra,
         )
+        body["stream"] = True
         async with self._http.astream_request("POST", "chat/completions", json=body) as response:
-            async for chunk in _aiter_sse(response, http=self._http):
+            async for chunk in _aiter_sse(
+                response, http=self._http, generation_id=response.headers.get("X-Generation-Id")
+            ):
                 yield chunk
 
 
 class StreamChunk:
     """A single SSE chunk of a streaming completion."""
 
-    def __init__(self, raw: dict[str, Any]) -> None:
+    def __init__(self, raw: dict[str, Any], generation_id: str | None = None) -> None:
         self.raw = raw
+        self.generation_id = generation_id
+
+    @property
+    def error(self) -> Any:
+        return self.raw.get("error") if isinstance(self.raw, dict) else None
 
     @property
     def content(self) -> str:
@@ -290,22 +305,40 @@ class StreamChunk:
         return usage.cost_rub if usage else None
 
 
-def _iter_sse(response: Any, *, http: HTTPClient) -> Iterator[StreamChunk]:
+def _parse_sse_event(data: str, chunks_received: int) -> dict[str, Any] | None:
+    if data == "[DONE]":
+        return None
+    try:
+        payload = json.loads(data)
+    except json.JSONDecodeError as exc:
+        raise RouterAIError(f"unparsable SSE line: {data!r}") from exc
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if error:
+        status_code = 200
+        if isinstance(error, dict):
+            status_code = int(error.get("status_code") or payload.get("status_code") or 200)
+        raise APIStatusError(
+            str(error.get("message", error) if isinstance(error, dict) else error),
+            status_code,
+            dict(payload),
+        )
+    return dict(payload)
+
+
+def _iter_sse(
+    response: Any, *, http: HTTPClient, generation_id: str | None = None
+) -> Iterator[StreamChunk]:
     chunks_received = 0
     try:
         for line in response.iter_lines():
             if not line or not line.startswith("data:"):
                 continue
             data = line[5:].strip()
-            if data == "[DONE]":
+            payload = _parse_sse_event(data, chunks_received)
+            if payload is None:
                 break
-            try:
-                payload = json.loads(data)
-            except json.JSONDecodeError as exc:
-                http.logger.debug("skip unparsable SSE line: %r", data)
-                raise RouterAIError(f"unparsable SSE line: {data!r}") from exc
             chunks_received += 1
-            yield StreamChunk(payload)
+            yield StreamChunk(payload, generation_id=generation_id)
     except (httpx.TimeoutException, httpx.TransportError) as exc:
         raise StreamInterruptedError(
             f"stream interrupted after {chunks_received} chunks: {exc}",
@@ -313,22 +346,20 @@ def _iter_sse(response: Any, *, http: HTTPClient) -> Iterator[StreamChunk]:
         ) from exc
 
 
-async def _aiter_sse(response: Any, *, http: HTTPClient) -> AsyncIterator[StreamChunk]:
+async def _aiter_sse(
+    response: Any, *, http: HTTPClient, generation_id: str | None = None
+) -> AsyncIterator[StreamChunk]:
     chunks_received = 0
     try:
         async for line in response.aiter_lines():
             if not line or not line.startswith("data:"):
                 continue
             data = line[5:].strip()
-            if data == "[DONE]":
+            payload = _parse_sse_event(data, chunks_received)
+            if payload is None:
                 break
-            try:
-                payload = json.loads(data)
-            except json.JSONDecodeError as exc:
-                http.logger.debug("skip unparsable SSE line: %r", data)
-                raise RouterAIError(f"unparsable SSE line: {data!r}") from exc
             chunks_received += 1
-            yield StreamChunk(payload)
+            yield StreamChunk(payload, generation_id=generation_id)
     except (httpx.TimeoutException, httpx.TransportError) as exc:
         raise StreamInterruptedError(
             f"stream interrupted after {chunks_received} chunks: {exc}",
