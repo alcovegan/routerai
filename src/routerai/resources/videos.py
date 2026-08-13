@@ -5,6 +5,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from ..errors import RouterAIError
+from ..schemas import Usage
 
 if TYPE_CHECKING:
     from .._http import HTTPClient
@@ -19,33 +20,48 @@ class VideoTask:
         self.status: str = payload.get("status", "pending")
         self.polling_url: str | None = payload.get("polling_url")
         self.raw = payload
+        self._apply(payload)
+
+    def _apply(self, payload: dict[str, Any]) -> None:
+        self.status = payload.get("status", self.status)
+        self.raw = payload
+        usage_payload = payload.get("usage")
+        if usage_payload is None and isinstance(payload.get("data"), dict):
+            usage_payload = payload["data"].get("usage")
+        self._usage = (
+            Usage.model_validate(usage_payload) if isinstance(usage_payload, dict) else None
+        )
+
+    @property
+    def urls(self) -> list[str]:
+        urls = self.raw.get("unsigned_urls") or self.raw.get("urls") or []
+        return [str(url) for url in urls]
+
+    @property
+    def error(self) -> Any:
+        return self.raw.get("error")
+
+    @property
+    def generation_id(self) -> str | None:
+        return self.raw.get("generation_id")
+
+    @property
+    def cost_rub(self) -> Decimal | None:
+        return self._usage.cost_rub if self._usage else None
 
     def refresh(self) -> VideoTask:
         response = self._http.get(f"videos/{self.id}")
-        payload = response.json()
-        self.status = payload.get("status", self.status)
-        self.raw = payload
+        self._apply(self._http._json(response))
         return self
 
     async def arefresh(self) -> VideoTask:
         response = await self._http.aget(f"videos/{self.id}")
-        payload = response.json()
-        self.status = payload.get("status", self.status)
-        self.raw = payload
+        self._apply(self._http._json(response))
         return self
 
     @property
     def done(self) -> bool:
         return self.status not in _POLL_STATUSES
-
-    @property
-    def cost_rub(self) -> Decimal | None:
-        usage: dict[str, Any] | None = (
-            (self.raw.get("data") or {}).get("usage")
-            if isinstance(self.raw.get("data"), dict)
-            else None
-        )
-        return usage.get("cost") if usage else None
 
     def wait(
         self,

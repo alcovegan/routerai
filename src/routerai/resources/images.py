@@ -94,7 +94,7 @@ class Images:
             extra=extra,
         )
         response = await self._http.apost("images", json=body)
-        return self._parse(response)
+        return await self._aparse(response)
 
     def _body(
         self,
@@ -119,7 +119,7 @@ class Images:
         return body
 
     def _parse(self, response: Any) -> ImageResult:
-        payload = response.json()
+        payload = self._http._json(response)
         images = []
         for item in payload.get("data") or []:
             b64 = item.get("b64_json")
@@ -131,6 +131,25 @@ class Images:
                 import httpx
 
                 fetched = httpx.get(url, timeout=60.0)
+                fetched.raise_for_status()
+                images.append(GeneratedImage(fetched.content))
+        usage = Usage.model_validate(payload["usage"]) if payload.get("usage") else None
+        return ImageResult(images, usage, payload, response.headers.get("X-Generation-Id"))
+
+    async def _aparse(self, response: Any) -> ImageResult:
+        payload = self._http._json(response)
+        images = []
+        for item in payload.get("data") or []:
+            b64 = item.get("b64_json")
+            if b64:
+                images.append(GeneratedImage(base64.b64decode(b64), b64=b64))
+                continue
+            url = item.get("url")
+            if url:
+                import httpx
+
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    fetched = await client.get(url)
                 fetched.raise_for_status()
                 images.append(GeneratedImage(fetched.content))
         usage = Usage.model_validate(payload["usage"]) if payload.get("usage") else None

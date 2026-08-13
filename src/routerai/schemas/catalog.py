@@ -19,6 +19,7 @@ class Capability(str, Enum):
     VIDEO_INPUT = "video-input"
     VIDEO_GENERATION = "video"
     AUDIO_INPUT = "audio-input"
+    AUDIO_GENERATION = "audio"
     SPEECH = "speech"
     TRANSCRIPTION = "transcription"
     EMBEDDINGS = "embeddings"
@@ -103,6 +104,8 @@ class Model(BaseModel):
             caps.add(Capability.VIDEO_GENERATION)
         if "audio" in inputs:
             caps.add(Capability.AUDIO_INPUT)
+        if "audio" in outputs:
+            caps.add(Capability.AUDIO_GENERATION)
         if "speech" in outputs:
             caps.add(Capability.SPEECH)
         if "transcription" in outputs:
@@ -115,8 +118,6 @@ class Model(BaseModel):
             caps.add(Capability.TOOLS)
         if "include_reasoning" in params or "reasoning" in params:
             caps.add(Capability.REASONING)
-        if not caps:
-            caps.add(Capability.TEXT)
         return caps
 
 
