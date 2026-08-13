@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 from collections.abc import Iterable
@@ -20,6 +21,9 @@ class Models:
     All listing methods hit ``GET /api/v1/models`` (no auth required) and
     cache the result for ``ttl`` seconds. Search is performed client-side
     because the upstream endpoint ignores query filters.
+
+    The cache is shared between sync and async paths; async refreshes are
+    single-flight (concurrent callers share one in-flight fetch).
     """
 
     def __init__(self, http: HTTPClient, *, ttl: float = _DEFAULT_TTL) -> None:
@@ -28,29 +32,48 @@ class Models:
         self._cache: list[Model] | None = None
         self._fetched_at: float | None = None
         self._lock = threading.Lock()
+        self._async_lock: asyncio.Lock | None = None
+        self._async_loop: asyncio.AbstractEventLoop | None = None
 
     # --- cache ---
 
+    def _is_fresh(self) -> bool:
+        if self._cache is None or self._fetched_at is None:
+            return False
+        return time.monotonic() - self._fetched_at < self._ttl
+
     def _refresh_if_stale(self) -> None:
-        now = time.monotonic()
-        if (
-            self._cache is not None
-            and self._fetched_at is not None
-            and now - self._fetched_at < self._ttl
-        ):
+        if self._is_fresh():
             return
         with self._lock:
-            now = time.monotonic()
-            if (
-                self._cache is not None
-                and self._fetched_at is not None
-                and now - self._fetched_at < self._ttl
-            ):
+            if self._is_fresh():
                 return
-            response = self._http.get("models")
+            self._fetch_sync()
+
+    def _fetch_sync(self) -> None:
+        response = self._http.get("models")
+        data = response.json()["data"]
+        self._cache = [Model.model_validate(item) for item in data]
+        self._fetched_at = time.monotonic()
+
+    def _ensure_async_lock(self) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        if self._async_lock is None or self._async_loop is not loop:
+            self._async_lock = asyncio.Lock()
+            self._async_loop = loop
+        return self._async_lock
+
+    async def _arefresh_if_stale(self) -> None:
+        if self._is_fresh():
+            return
+        lock = self._ensure_async_lock()
+        async with lock:
+            if self._is_fresh():
+                return
+            response = await self._http.aget("models")
             data = response.json()["data"]
             self._cache = [Model.model_validate(item) for item in data]
-            self._fetched_at = now
+            self._fetched_at = time.monotonic()
 
     def clear_cache(self) -> None:
         self._cache = None
@@ -67,10 +90,10 @@ class Models:
         return list(self._cache)
 
     async def aall(self, *, force_refresh: bool = False) -> list[Model]:
-        if force_refresh or self._cache is None or self._fetched_at is None:
-            response = await self._http.aget("models")
-            self._cache = [Model.model_validate(item) for item in response.json()["data"]]
-            self._fetched_at = time.monotonic()
+        if force_refresh:
+            self.clear_cache()
+        await self._arefresh_if_stale()
+        assert self._cache is not None
         return list(self._cache)
 
     def get(self, model_id: str) -> Model:
@@ -182,6 +205,9 @@ class Models:
 
     def speech(self) -> list[Model]:
         return self.by_capability(Capability.SPEECH)
+
+    def audio_generation(self) -> list[Model]:
+        return self.by_capability(Capability.AUDIO_GENERATION)
 
     def transcription(self) -> list[Model]:
         return self.by_capability(Capability.TRANSCRIPTION)
