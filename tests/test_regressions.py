@@ -371,6 +371,32 @@ def test_request_body_is_valid_json():
     assert json.loads(json.dumps(body)) == body
 
 
+# --- HTTP 200 with embedded error payload (RouterAI wraps provider errors) ---
+
+
+def test_http_200_with_error_payload_raises(respx_mock):
+    payload = {"error": '{"error":{"message":"Provider returned error","code":400}}'}
+    respx_mock.post("https://routerai.ru/api/v1/chat/completions").mock(
+        return_value=httpx_response(payload, status_code=200)
+    )
+    client = RouterAI(api_key="sk-test", max_retries=0)
+    with pytest.raises(APIStatusError) as exc_info:
+        client.chat.complete("m", "x")
+    assert exc_info.value.status_code == 200
+    assert exc_info.value.body == payload
+    client.close()
+
+
+def test_http_200_binary_body_is_not_an_error(respx_mock):
+    respx_mock.post("https://routerai.ru/api/v1/audio/speech").mock(
+        return_value=httpx_response(b"\xff\xfb\x90mp3-binary-bytes")
+    )
+    client = RouterAI(api_key="sk-test")
+    result = client.audio.speech("m", "текст", voice="eve")
+    assert result.data == b"\xff\xfb\x90mp3-binary-bytes"
+    client.close()
+
+
 # --- API-02: public exceptions exported from the top-level package ---
 
 

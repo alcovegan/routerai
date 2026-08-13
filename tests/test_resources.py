@@ -139,6 +139,15 @@ def test_video_task_polling(respx_mock):
     client.close()
 
 
+def test_account_credits(respx_mock):
+    respx_mock.get("https://routerai.ru/api/v1/credits").mock(
+        return_value=httpx_response({"data": {"credits": 531.6199}})
+    )
+    client = RouterAI(api_key="sk-test")
+    assert client.account.credits() == Decimal("531.6199")
+    client.close()
+
+
 def test_keys_and_team(respx_mock):
     respx_mock.get("https://routerai.ru/api/v1/keys").mock(
         return_value=httpx_response({"data": [{"id": "k1", "name": "prod"}]})
