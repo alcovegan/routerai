@@ -72,5 +72,9 @@ class VideoGenerationError(RouterAIError):
         self.error = error
 
 
+class WebhookVerificationError(RouterAIError):
+    """Raised when a video webhook fails signature or freshness checks."""
+
+
 class ModelNotFoundError(RouterAIError):
     """Raised when a model is not found in the catalog."""
