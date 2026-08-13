@@ -54,7 +54,7 @@ class Audio:
         response = self._http.post(
             "audio/speech", json=self._tts_body(model, input, voice, response_format, speed, extra)
         )
-        return SpeechResult(response.content, response.headers.get("X-Generation-Id"))
+        return SpeechResult(response.content, response.generation_id)
 
     async def aspeech(
         self,
@@ -69,7 +69,7 @@ class Audio:
         response = await self._http.apost(
             "audio/speech", json=self._tts_body(model, input, voice, response_format, speed, extra)
         )
-        return SpeechResult(response.content, response.headers.get("X-Generation-Id"))
+        return SpeechResult(response.content, response.generation_id)
 
     def _tts_body(
         self,
@@ -122,9 +122,7 @@ class Audio:
             extra,
         )
         response = self._http.post("audio/transcriptions", json=payload)
-        return TranscriptionResult.from_response(
-            self._http._json(response), response.headers.get("X-Generation-Id")
-        )
+        return TranscriptionResult.from_response(self._http._json(response), response.generation_id)
 
     async def atranscribe(
         self,
@@ -154,9 +152,7 @@ class Audio:
             extra,
         )
         response = await self._http.apost("audio/transcriptions", json=payload)
-        return TranscriptionResult.from_response(
-            self._http._json(response), response.headers.get("X-Generation-Id")
-        )
+        return TranscriptionResult.from_response(self._http._json(response), response.generation_id)
 
     def _stt_payload(
         self,

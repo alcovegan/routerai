@@ -31,7 +31,9 @@ class Embeddings:
         if extra:
             body.update(extra)
         response = self._http.post("embeddings", json=body)
-        return EmbeddingsResult.from_response(response.json())
+        return EmbeddingsResult.from_response(
+            response.json(), generation_id=response.generation_id, request_id=response.request_id
+        )
 
     async def acreate(
         self,
@@ -48,23 +50,38 @@ class Embeddings:
         if extra:
             body.update(extra)
         response = await self._http.apost("embeddings", json=body)
-        return EmbeddingsResult.from_response(response.json())
+        return EmbeddingsResult.from_response(
+            response.json(), generation_id=response.generation_id, request_id=response.request_id
+        )
 
 
 class EmbeddingsResult:
     def __init__(
-        self, embeddings: list[list[float]], usage: Usage | None, raw: dict[str, Any]
+        self,
+        embeddings: list[list[float]],
+        usage: Usage | None,
+        raw: dict[str, Any],
+        generation_id: str | None = None,
+        request_id: str | None = None,
     ) -> None:
         self.embeddings = embeddings
         self.usage = usage
         self.raw = raw
+        self.generation_id = generation_id
+        self.request_id = request_id
 
     @classmethod
-    def from_response(cls, payload: dict[str, Any]) -> EmbeddingsResult:
+    def from_response(
+        cls,
+        payload: dict[str, Any],
+        *,
+        generation_id: str | None = None,
+        request_id: str | None = None,
+    ) -> EmbeddingsResult:
         data = payload.get("data") or []
         embeddings = [list(item.get("embedding") or []) for item in data if isinstance(item, dict)]
         usage = Usage.model_validate(payload["usage"]) if payload.get("usage") else None
-        return cls(embeddings, usage, payload)
+        return cls(embeddings, usage, payload, generation_id, request_id)
 
     @property
     def cost_rub(self) -> Decimal | None:
@@ -93,7 +110,9 @@ class Rerank:
         if extra:
             body.update(extra)
         response = self._http.post("rerank", json=body)
-        return RerankResult.from_response(response.json())
+        return RerankResult.from_response(
+            response.json(), generation_id=response.generation_id, request_id=response.request_id
+        )
 
     async def acreate(
         self,
@@ -111,22 +130,37 @@ class Rerank:
         if extra:
             body.update(extra)
         response = await self._http.apost("rerank", json=body)
-        return RerankResult.from_response(response.json())
+        return RerankResult.from_response(
+            response.json(), generation_id=response.generation_id, request_id=response.request_id
+        )
 
 
 class RerankResult:
     def __init__(
-        self, results: list[dict[str, Any]], usage: Usage | None, raw: dict[str, Any]
+        self,
+        results: list[dict[str, Any]],
+        usage: Usage | None,
+        raw: dict[str, Any],
+        generation_id: str | None = None,
+        request_id: str | None = None,
     ) -> None:
         self.results = results
         self.usage = usage
         self.raw = raw
+        self.generation_id = generation_id
+        self.request_id = request_id
 
     @classmethod
-    def from_response(cls, payload: dict[str, Any]) -> RerankResult:
+    def from_response(
+        cls,
+        payload: dict[str, Any],
+        *,
+        generation_id: str | None = None,
+        request_id: str | None = None,
+    ) -> RerankResult:
         results = payload.get("results") or payload.get("data") or []
         usage = Usage.model_validate(payload["usage"]) if payload.get("usage") else None
-        return cls(list(results), usage, payload)
+        return cls(list(results), usage, payload, generation_id, request_id)
 
     def top_documents(self, documents: list[str] | None = None) -> list[str]:
         ordered = sorted(

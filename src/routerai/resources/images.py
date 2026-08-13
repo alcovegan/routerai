@@ -213,4 +213,4 @@ class Images:
         payload = self._http._json(response)
         images = [self._parse_item(item) for item in payload.get("data") or []]
         usage = Usage.model_validate(payload["usage"]) if payload.get("usage") else None
-        return ImageResult(images, usage, payload, response.headers.get("X-Generation-Id"))
+        return ImageResult(images, usage, payload, response.generation_id)

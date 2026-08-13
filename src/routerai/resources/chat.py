@@ -99,7 +99,7 @@ class Chat:
             extra=extra,
         )
         response = self._http.post("chat/completions", json=body)
-        generation_id = response.headers.get("X-Generation-Id")
+        generation_id = response.generation_id
         return ChatResult.from_response(response.json(), generation_id=generation_id)
 
     async def acomplete(
@@ -135,7 +135,7 @@ class Chat:
             extra=extra,
         )
         response = await self._http.apost("chat/completions", json=body)
-        generation_id = response.headers.get("X-Generation-Id")
+        generation_id = response.generation_id
         return ChatResult.from_response(response.json(), generation_id=generation_id)
 
     def _build_body(
@@ -219,7 +219,9 @@ class Chat:
         body["stream"] = True
         with self._http.stream_request("POST", "chat/completions", json=body) as response:
             yield from _iter_sse(
-                response, http=self._http, generation_id=response.headers.get("X-Generation-Id")
+                response,
+                http=self._http,
+                generation_id=response.headers.get("X-Generation-Id"),
             )
 
     async def astream(
@@ -256,7 +258,9 @@ class Chat:
         body["stream"] = True
         async with self._http.astream_request("POST", "chat/completions", json=body) as response:
             async for chunk in _aiter_sse(
-                response, http=self._http, generation_id=response.headers.get("X-Generation-Id")
+                response,
+                http=self._http,
+                generation_id=response.headers.get("X-Generation-Id"),
             ):
                 yield chunk
 

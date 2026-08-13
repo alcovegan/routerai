@@ -36,9 +36,7 @@ class Completions:
         if extra:
             body.update(extra)
         response = self._http.post("completions", json=body)
-        return CompletionsResult.from_response(
-            self._http._json(response), response.headers.get("X-Generation-Id")
-        )
+        return CompletionsResult.from_response(self._http._json(response), response.generation_id)
 
     async def acreate(
         self,
@@ -58,9 +56,7 @@ class Completions:
         if extra:
             body.update(extra)
         response = await self._http.apost("completions", json=body)
-        return CompletionsResult.from_response(
-            self._http._json(response), response.headers.get("X-Generation-Id")
-        )
+        return CompletionsResult.from_response(self._http._json(response), response.generation_id)
 
 
 class CompletionChoice(BaseModel):
