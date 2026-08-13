@@ -10,13 +10,14 @@ from decimal import Decimal
 import httpx
 import pytest
 
-from routerai import Registry, RouterAI
+from routerai import Registry, RouterAI, StreamAccumulator
 from routerai.errors import (
     APIStatusError,
     AuthenticationError,
     ConfigurationError,
     RouterAIError,
     StreamInterruptedError,
+    WebhookVerificationError,
 )
 
 from .conftest import CATALOG, httpx_response
@@ -1263,3 +1264,182 @@ def test_management_types_exported():
     ):
         assert name in routerai.__all__
         assert hasattr(routerai, name)
+
+
+# --- audit 4 wave: multimodal lifecycle ---
+
+
+def test_images_typed_parameters_and_optional_prompt(respx_mock):
+    respx_mock.post("https://routerai.ru/api/v1/images").mock(
+        return_value=httpx_response({"created": 1, "data": [{"b64_json": "cG5n"}]})
+    )
+    client = RouterAI(api_key="sk-test")
+    client.images.generate(
+        "m",
+        None,
+        input_references=[
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,cG5n"}}
+        ],
+        aspect_ratio="16:9",
+        resolution="1K",
+        background="transparent",
+        output_format="webp",
+        output_compression=80,
+        seed=42,
+    )
+    body = json.loads(respx_mock.calls.last.request.content)
+    assert body["aspect_ratio"] == "16:9"
+    assert body["resolution"] == "1K"
+    assert body["background"] == "transparent"
+    assert body["output_format"] == "webp"
+    assert body["output_compression"] == 80
+    assert body["seed"] == 42
+    assert "prompt" not in body
+    assert body["input_references"]
+
+    with pytest.raises(ValueError, match="prompt is required"):
+        client.images.generate("m")
+    assert respx_mock.calls.call_count == 1
+    client.close()
+
+
+def test_images_stream_events(respx_mock, tmp_path):
+    import base64 as b64lib
+
+    partial = b64lib.b64encode(b"part").decode()
+    full = b64lib.b64encode(b"full").decode()
+    sse = "\n".join(
+        [
+            'data: {"type":"image_generation.partial_image","data":[{"b64_json":"'
+            + partial
+            + '"}]}',
+            'data: {"type":"image_generation.completed","data":[{"b64_json":"'
+            + full
+            + '"}],"usage":{"cost":4.32}}',
+            "data: [DONE]",
+        ]
+    )
+    respx_mock.post("https://routerai.ru/api/v1/images").mock(
+        return_value=httpx_response(sse.encode(), headers={"X-Generation-Id": "gen-img-s"})
+    )
+    client = RouterAI(api_key="sk-test")
+    chunks = list(client.images.stream("m", "промпт"))
+    assert chunks[0].type == "image_generation.partial_image"
+    assert chunks[0].images[0].data == b"part"
+    assert chunks[-1].is_completed
+    assert chunks[-1].images[0].data == b"full"
+    assert chunks[-1].cost_rub == Decimal("4.32")
+    assert chunks[-1].generation_id == "gen-img-s"
+    body = json.loads(respx_mock.calls.last.request.content)
+    assert body["stream"] is True
+    client.close()
+
+
+def test_tts_streaming_bytes(respx_mock):
+    respx_mock.post("https://routerai.ru/api/v1/audio/speech").mock(
+        return_value=httpx_response(b"mp3-part1-mp3-part2")
+    )
+    client = RouterAI(api_key="sk-test")
+    chunks = list(client.audio.speech_stream("m", "text", voice="eve"))
+    assert b"".join(chunks) == b"mp3-part1-mp3-part2"
+    client.close()
+
+
+def test_chat_audio_delta_and_accumulator(respx_mock):
+    import base64 as b64
+
+    audio_data = b64.b64encode(b"\x00\x01pcm").decode()
+    sse = "\n".join(
+        [
+            'data: {"choices":[{"delta":{"content":"сейчас"}}]}',
+            'data: {"choices":[{"delta":{"audio":{"data":"'
+            + audio_data
+            + '","format":"pcm16","transcript":"бип"}}}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"total_tokens":5,"cost":0.02}}',
+            "data: [DONE]",
+        ]
+    )
+    respx_mock.post("https://routerai.ru/api/v1/chat/completions").mock(
+        return_value=httpx_response(sse.encode(), headers={"X-Generation-Id": "gen-audio"})
+    )
+    client = RouterAI(api_key="sk-test")
+    accumulator = StreamAccumulator()
+    for chunk in client.chat.stream("m", "x", extra={"modalities": ["audio", "text"]}):
+        accumulator.add(chunk)
+    assert accumulator.content == "сейчас"
+    assert accumulator.audio[0].format == "pcm16"
+    assert accumulator.audio[0].data == b"\x00\x01pcm"
+    assert accumulator.audio[0].transcript == "бип"
+    assert accumulator.cost_rub == Decimal("0.02")
+    assert accumulator.generation_id == "gen-audio"
+    assert accumulator.finish_reason == "stop"
+    client.close()
+
+
+def test_stream_accumulator_exported():
+    import routerai
+
+    assert hasattr(routerai, "StreamAccumulator")
+
+
+# --- audit 4 wave: webhook verifier ---
+
+
+def compute_video_signature(api_key: str, timestamp: int, payload: bytes) -> str:
+    """RouterAI scheme: HMAC_SHA256(sha256_hex(api_key), "<ts>.<raw_body>")."""
+    import hashlib
+    import hmac
+
+    from routerai.webhooks import signing_secret
+
+    signed = f"{timestamp}.".encode() + payload
+    return hmac.new(signing_secret(api_key).encode(), signed, hashlib.sha256).hexdigest()
+
+
+def test_webhook_verify_valid_signature():
+    from routerai.webhooks import verify_video
+
+    api_key = "sk-webhook-test-key"
+    timestamp = int(__import__("time").time())
+    payload = b'{"id":"v1","status":"completed"}'
+    signature = compute_video_signature(api_key, timestamp, payload)
+    data = verify_video(payload, signature, api_key, str(timestamp))
+    assert data["id"] == "v1"
+
+
+def test_webhook_verify_rejects_tampered_payload():
+    from routerai.webhooks import verify_video
+
+    api_key = "sk-webhook-test-key"
+    timestamp = int(__import__("time").time())
+    signature = compute_video_signature(api_key, timestamp, b'{"id":"v1"}')
+    with pytest.raises(WebhookVerificationError):
+        verify_video(b'{"id":"v2"}', signature, api_key, str(timestamp))
+
+
+def test_webhook_verify_rejects_stale_timestamp():
+    from routerai.webhooks import verify_video
+
+    api_key = "sk-webhook-test-key"
+    stale = int(__import__("time").time()) - 7200
+    payload = b'{"id":"v1"}'
+    signature = compute_video_signature(api_key, stale, payload)
+    with pytest.raises(WebhookVerificationError):
+        verify_video(payload, signature, api_key, str(stale), max_age_seconds=300)
+
+
+def test_webhook_verify_rejects_wrong_secret():
+    from routerai.webhooks import verify_video
+
+    timestamp = int(__import__("time").time())
+    payload = b'{"id":"v1"}'
+    signature = compute_video_signature("sk-a", timestamp, payload)
+    with pytest.raises(WebhookVerificationError):
+        verify_video(payload, signature, "sk-b", str(timestamp))
+
+
+def test_webhook_verify_rejects_malformed_timestamp():
+    from routerai.webhooks import verify_video
+
+    with pytest.raises(WebhookVerificationError):
+        verify_video(b'{"id":"v1"}', "sig", "sk-a", "not-a-timestamp")
