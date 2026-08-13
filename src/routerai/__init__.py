@@ -38,7 +38,13 @@ from .schemas import (
     Usage,
 )
 
-__version__ = "0.1.0"
+__version__: str
+try:
+    from importlib.metadata import version
+
+    __version__ = version("routerai")
+except Exception:  # pragma: no cover - source checkout without installed metadata
+    __version__ = "0.1.0"
 
 __all__ = [
     "APIStatusError",

@@ -21,3 +21,6 @@ jobs:
       - run: uv run ruff format --check src tests
       - run: uv run mypy src
       - run: uv run pytest -q -m "not live"
+      - uses: pypa/gh-action-pip-audit@v1.1.0
+        with:
+          inputs: uv.lock
