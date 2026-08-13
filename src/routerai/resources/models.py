@@ -14,6 +14,8 @@ if TYPE_CHECKING:
 
 _DEFAULT_TTL = 600.0
 
+ModelList = list[Model]
+
 
 class Models:
     """Catalog of available models: listing, lookup, search, grouping.
@@ -29,7 +31,7 @@ class Models:
     def __init__(self, http: HTTPClient, *, ttl: float = _DEFAULT_TTL) -> None:
         self._http = http
         self._ttl = ttl
-        self._cache: list[Model] | None = None
+        self._cache: ModelList | None = None
         self._fetched_at: float | None = None
         self._lock = threading.Lock()
         self._async_lock: asyncio.Lock | None = None
@@ -81,7 +83,7 @@ class Models:
 
     # --- listing ---
 
-    def all(self, *, force_refresh: bool = False) -> list[Model]:
+    def all(self, *, force_refresh: bool = False) -> ModelList:
         """Return the full catalog of models."""
         if force_refresh:
             self.clear_cache()
@@ -89,7 +91,7 @@ class Models:
         assert self._cache is not None
         return list(self._cache)
 
-    async def aall(self, *, force_refresh: bool = False) -> list[Model]:
+    async def aall(self, *, force_refresh: bool = False) -> ModelList:
         if force_refresh:
             self.clear_cache()
         await self._arefresh_if_stale()
@@ -124,7 +126,7 @@ class Models:
         max_price_completion: float | None = None,
         reasoning: bool | None = None,
         tools: bool | None = None,
-    ) -> list[Model]:
+    ) -> ModelList:
         """Client-side search over the catalog.
 
         Args:
@@ -173,43 +175,43 @@ class Models:
 
     # --- capabilities ---
 
-    def by_capability(self, capability: str | Capability) -> list[Model]:
+    def by_capability(self, capability: str | Capability) -> ModelList:
         cap = Capability(capability)
         return [m for m in self.all() if cap in m.capabilities]
 
-    def grouped(self) -> dict[Capability, list[Model]]:
+    def grouped(self) -> dict[Capability, ModelList]:
         """Group all models by capability (a model may appear in several groups)."""
-        grouped: dict[Capability, list[Model]] = {cap: [] for cap in Capability}
+        grouped: dict[Capability, ModelList] = {cap: [] for cap in Capability}
         for model in self.all():
             for cap in model.capabilities:
                 grouped[cap].append(model)
         return {cap: models for cap, models in grouped.items() if models}
 
-    def text(self) -> list[Model]:
+    def text(self) -> ModelList:
         return self.by_capability(Capability.TEXT)
 
-    def reasoning(self) -> list[Model]:
+    def reasoning(self) -> ModelList:
         return self.by_capability(Capability.REASONING)
 
-    def vision(self) -> list[Model]:
+    def vision(self) -> ModelList:
         return self.by_capability(Capability.VISION)
 
-    def image_generation(self) -> list[Model]:
+    def image_generation(self) -> ModelList:
         return self.by_capability(Capability.IMAGE_GENERATION)
 
-    def embeddings(self) -> list[Model]:
+    def embeddings(self) -> ModelList:
         return self.by_capability(Capability.EMBEDDINGS)
 
-    def rerank(self) -> list[Model]:
+    def rerank(self) -> ModelList:
         return self.by_capability(Capability.RERANK)
 
-    def speech(self) -> list[Model]:
+    def speech(self) -> ModelList:
         return self.by_capability(Capability.SPEECH)
 
-    def audio_generation(self) -> list[Model]:
+    def audio_generation(self) -> ModelList:
         return self.by_capability(Capability.AUDIO_GENERATION)
 
-    def transcription(self) -> list[Model]:
+    def transcription(self) -> ModelList:
         return self.by_capability(Capability.TRANSCRIPTION)
 
     # --- endpoints ---
@@ -225,9 +227,15 @@ class Models:
         response = await self._http.aget(f"models/{author}/{slug}/endpoints")
         return ModelDetail.model_validate(response.json()["data"])
 
+    # --- aliases (real methods so type checkers see them) ---
 
-Models.list = Models.all  # type: ignore[attr-defined]  # alias for Models.all()
-Models.alist = Models.aall  # type: ignore[attr-defined]
+    def list(self, *, force_refresh: bool = False) -> ModelList:
+        """Alias for :meth:`all`."""
+        return self.all(force_refresh=force_refresh)
+
+    async def alist(self, *, force_refresh: bool = False) -> ModelList:
+        """Alias for :meth:`aall`."""
+        return await self.aall(force_refresh=force_refresh)
 
 
 def _normalize_capabilities(values: Iterable[str | Capability] | None) -> set[Capability]:

@@ -98,21 +98,7 @@ class ChatResult(BaseModel):
 
     @classmethod
     def from_response(cls, payload: dict[str, Any], generation_id: str | None = None) -> ChatResult:
-        choices = []
-        for item in payload.get("choices") or []:
-            message_payload = item.get("message")
-            message = (
-                Message.model_validate(message_payload)
-                if isinstance(message_payload, dict)
-                else None
-            )
-            choices.append(
-                Choice(
-                    index=item.get("index", 0),
-                    message=message,
-                    finish_reason=item.get("finish_reason"),
-                )
-            )
+        choices = [Choice.model_validate(item) for item in payload.get("choices") or []]
 
         first = choices[0] if choices else None
         first_message = first.message if first else None
