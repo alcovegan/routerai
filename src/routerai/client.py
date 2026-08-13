@@ -7,6 +7,7 @@ from typing import Any
 import httpx
 
 from ._http import DEFAULT_BASE_URL, HTTPClient
+from .resources.account import Account
 from .resources.audio import Audio
 from .resources.chat import Chat
 from .resources.completions import Completions, Messages, Responses
@@ -47,7 +48,7 @@ class RouterAI:
 
     Resource namespaces: ``chat``, ``models``, ``completions``, ``responses``,
     ``messages``, ``images``, ``videos``, ``audio``, ``embeddings``,
-    ``rerank``, ``generation``, ``keys``, ``team``.
+    ``rerank``, ``generation``, ``keys``, ``team``, ``account``.
     """
 
     def __init__(
@@ -78,6 +79,7 @@ class RouterAI:
         )
         self.chat = Chat(self._http)
         self.models = Models(self._http, ttl=models_ttl)
+        self.account = Account(self._http)
         self.completions = Completions(self._http)
         self.responses = Responses(self._http)
         self.messages = Messages(self._http)
