@@ -48,12 +48,15 @@ class GeneratedImage:
         """Download a url-based image explicitly (HTTPS only, size-limited).
 
         Redirects are followed manually and every hop must stay on HTTPS;
-        data is streamed into a temp file and atomically renamed into place.
+        each hop is streamed (no full-body buffering), the byte limit is
+        enforced before each write, and data lands in a unique temp file
+        that is atomically renamed only on success.
         """
-        import os
         import urllib.parse
 
         import httpx
+
+        from .._files import AtomicFileWriter
 
         if not self.url:
             raise RouterAIError("image has no url; use save() for inline data")
@@ -62,29 +65,24 @@ class GeneratedImage:
         with httpx.Client(timeout=timeout, follow_redirects=False) as client:
             for _ in range(max_redirects + 1):
                 _validate_https_url(url)
-                response = client.get(url)
-                if response.status_code in (301, 302, 303, 307, 308):
-                    location = response.headers.get("Location")
-                    if not location:
-                        raise RouterAIError(f"redirect from {url!r} without a Location header")
-                    url = urllib.parse.urljoin(url, location)
-                    continue
-                response.raise_for_status()
-                path = Path(path)
-                path.parent.mkdir(parents=True, exist_ok=True)
-                tmp = path.with_name(f".{path.name}.part")
-                total = 0
-                with tmp.open("wb") as handle:
-                    for chunk in response.iter_bytes():
-                        total += len(chunk)
-                        if total > max_bytes:
-                            tmp.unlink(missing_ok=True)
-                            raise RouterAIError(
-                                f"image exceeds the {max_bytes} byte download limit"
-                            )
-                        handle.write(chunk)
-                os.replace(tmp, path)
-                return path
+                with client.stream("GET", url) as response:
+                    if response.status_code in (301, 302, 303, 307, 308):
+                        location = response.headers.get("Location")
+                        if not location:
+                            raise RouterAIError(f"redirect from {url!r} without a Location header")
+                        url = urllib.parse.urljoin(url, location)
+                        continue
+                    response.raise_for_status()
+                    content_length = response.headers.get("content-length", "")
+                    if content_length.isdigit() and int(content_length) > max_bytes:
+                        raise RouterAIError(
+                            f"image exceeds the {max_bytes} byte download limit "
+                            f"(content-length={content_length})"
+                        )
+                    with AtomicFileWriter(path, max_bytes=max_bytes) as writer:
+                        for chunk in response.iter_bytes():
+                            writer.write(chunk)
+                        return writer.commit()
         raise RouterAIError(f"too many redirects while downloading {self.url!r}")
 
 

@@ -439,16 +439,30 @@ def _parse_sse_event(data: str, chunks_received: int) -> dict[str, Any] | None:
     if error:
         raise APIStatusError(
             str(error.get("message", error) if isinstance(error, dict) else error),
-            _safe_status(error if isinstance(error, dict) else payload),
+            _safe_status(payload),
             dict(payload),
         )
     return dict(payload)
 
 
 def _safe_status(payload: dict[str, Any]) -> int:
-    """Normalize an SSE error status_code; malformed values default to 502."""
+    """Normalize an SSE error status.
+
+    Precedence: nested ``error.status_code``/``error.status``, then root
+    ``status_code``/``status``; malformed or out-of-range values fall back
+    to 502.
+    """
+    error = payload.get("error")
+    if isinstance(error, dict):
+        status = _normalize_status_value(error)
+        if status is not None:
+            return status
+    return _normalize_status_value(payload) or 502
+
+
+def _normalize_status_value(mapping: dict[str, Any]) -> int | None:
     for key in ("status_code", "status"):
-        value = payload.get(key)
+        value = mapping.get(key)
         if isinstance(value, bool):
             continue
         if isinstance(value, int) and 100 <= value <= 599:
@@ -457,7 +471,7 @@ def _safe_status(payload: dict[str, Any]) -> int:
             number = int(value)
             if 100 <= number <= 599:
                 return number
-    return 502
+    return None
 
 
 def _iter_sse(
