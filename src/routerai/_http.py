@@ -70,7 +70,10 @@ def _error_message(response: httpx.Response) -> str:
     For HTTP 200 responses only JSON error payloads count — plain-text or
     binary 200 bodies (e.g. TTS audio) are not errors.
     """
-    if response.status_code < 400 and "json" not in response.headers.get("content-type", ""):
+    if (
+        response.status_code < 400
+        and "json" not in response.headers.get("content-type", "").lower()
+    ):
         return ""
     body = _response_body(response)
     message = _parse_error_payload(body)
@@ -95,13 +98,21 @@ def _raise_for_status(response: httpx.Response, message: str) -> None:
     raise error_cls(text)
 
 
-def _retry_after_seconds(response: httpx.Response) -> float | None:
-    value = response.headers.get("Retry-After")
+def _retry_after_seconds(response: httpx.Response, *, max_retry_after: float) -> float | None:
+    """Parse Retry-After per RFC 9110 and clamp it to ``max_retry_after``.
+
+    Only strict integer delay-seconds or a valid HTTP-date are accepted;
+    anything else (fractions, nan, inf, garbage) falls back to the regular
+    exponential backoff.
+    """
+    import math
+
+    value = response.headers.get("Retry-After", "").strip()
     if not value:
         return None
-    try:
-        return max(0.0, float(value))
-    except ValueError:
+    if value.isdigit():
+        delay = float(int(value))
+    else:
         try:
             import email.utils
 
@@ -110,7 +121,10 @@ def _retry_after_seconds(response: httpx.Response) -> float | None:
             return None
         if date.tzinfo is None:
             return None
-        return max(0.0, date.timestamp() - time.time())
+        delay = date.timestamp() - time.time()
+    if not math.isfinite(delay) or delay < 0:
+        return None
+    return min(delay, max_retry_after)
 
 
 class HTTPClient:
@@ -130,6 +144,7 @@ class HTTPClient:
         max_retries: int = 2,
         retry_backoff: float = 1.0,
         retry_unsafe_methods: bool = False,
+        max_retry_after: float = 60.0,
         logger: logging.Logger | str | None = None,
         http_client: httpx.Client | httpx.AsyncClient | None = None,
         async_http_client: httpx.AsyncClient | None = None,
@@ -141,7 +156,7 @@ class HTTPClient:
             async_http_client = http_client
             http_client = None
 
-        self._validate_config(timeout, max_retries, retry_backoff)
+        self._validate_config(timeout, max_retries, retry_backoff, max_retry_after)
 
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
@@ -149,6 +164,7 @@ class HTTPClient:
         self._max_retries = max_retries
         self._retry_backoff = retry_backoff
         self._retry_unsafe_methods = retry_unsafe_methods
+        self._max_retry_after = max_retry_after
         if logger is None:
             from .logging import get_logger
 
@@ -175,7 +191,9 @@ class HTTPClient:
         return self._logger
 
     @staticmethod
-    def _validate_config(timeout: float, max_retries: int, retry_backoff: float) -> None:
+    def _validate_config(
+        timeout: float, max_retries: int, retry_backoff: float, max_retry_after: float
+    ) -> None:
         import math
 
         if not math.isfinite(timeout) or timeout <= 0:
@@ -187,6 +205,10 @@ class HTTPClient:
         if not math.isfinite(retry_backoff) or retry_backoff < 0:
             raise ConfigurationError(
                 f"retry_backoff must be a non-negative finite number, got {retry_backoff!r}"
+            )
+        if not math.isfinite(max_retry_after) or max_retry_after < 0:
+            raise ConfigurationError(
+                f"max_retry_after must be a non-negative finite number, got {max_retry_after!r}"
             )
 
     def _ensure_sync_client(self) -> httpx.Client:
@@ -231,7 +253,11 @@ class HTTPClient:
         return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout))
 
     def _wait(self, attempt: int, response: httpx.Response | None = None) -> None:
-        retry_after = _retry_after_seconds(response) if response is not None else None
+        retry_after = (
+            _retry_after_seconds(response, max_retry_after=self._max_retry_after)
+            if response is not None
+            else None
+        )
         if retry_after is not None:
             time.sleep(retry_after)
             return
@@ -241,7 +267,11 @@ class HTTPClient:
     async def _await(self, attempt: int, response: httpx.Response | None = None) -> None:
         import asyncio
 
-        retry_after = _retry_after_seconds(response) if response is not None else None
+        retry_after = (
+            _retry_after_seconds(response, max_retry_after=self._max_retry_after)
+            if response is not None
+            else None
+        )
         if retry_after is not None:
             await asyncio.sleep(retry_after)
             return
@@ -252,7 +282,7 @@ class HTTPClient:
         if not self._logger.isEnabledFor(logging.INFO):
             return
         tokens = cost = None
-        content_type = response.headers.get("content-type", "")
+        content_type = response.headers.get("content-type", "").lower()
         if "json" in content_type:
             try:
                 payload = response.json()
@@ -283,6 +313,7 @@ class HTTPClient:
         json: Any = None,
         content: bytes | None = None,
         headers: dict[str, str] | None = None,
+        timeout: float | None = None,
     ) -> httpx.Response:
         url = self._build_url(path)
         request_headers = self._merge_headers(headers, content=content)
@@ -299,7 +330,7 @@ class HTTPClient:
                     json=json,
                     content=content,
                     headers=request_headers,
-                    timeout=self._timeout,
+                    timeout=self._timeout if timeout is None else timeout,
                 )
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 last_exc = exc
@@ -342,6 +373,7 @@ class HTTPClient:
         json: Any = None,
         content: bytes | None = None,
         headers: dict[str, str] | None = None,
+        timeout: float | None = None,
     ) -> Iterator[httpx.Response]:
         """Open a streaming response.
 
@@ -365,7 +397,7 @@ class HTTPClient:
                     json=json,
                     content=content,
                     headers=request_headers,
-                    timeout=self._timeout,
+                    timeout=self._timeout if timeout is None else timeout,
                 ) as response:
                     if (
                         self._should_retry_status(method, response.status_code)
@@ -419,6 +451,7 @@ class HTTPClient:
         json: Any = None,
         content: bytes | None = None,
         headers: dict[str, str] | None = None,
+        timeout: float | None = None,
     ) -> httpx.Response:
         url = self._build_url(path)
         request_headers = self._merge_headers(headers, content=content)
@@ -435,7 +468,7 @@ class HTTPClient:
                     json=json,
                     content=content,
                     headers=request_headers,
-                    timeout=self._timeout,
+                    timeout=self._timeout if timeout is None else timeout,
                 )
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 last_exc = exc
@@ -478,6 +511,7 @@ class HTTPClient:
         json: Any = None,
         content: bytes | None = None,
         headers: dict[str, str] | None = None,
+        timeout: float | None = None,
     ) -> AsyncIterator[httpx.Response]:
         url = self._build_url(path)
         request_headers = self._merge_headers(headers, content=content)
@@ -495,7 +529,7 @@ class HTTPClient:
                     json=json,
                     content=content,
                     headers=request_headers,
-                    timeout=self._timeout,
+                    timeout=self._timeout if timeout is None else timeout,
                 ) as response:
                     if (
                         self._should_retry_status(method, response.status_code)

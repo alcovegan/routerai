@@ -7,6 +7,7 @@ from typing import Any
 import httpx
 
 from ._http import DEFAULT_BASE_URL, HTTPClient
+from .errors import ConfigurationError
 from .resources.account import Account
 from .resources.audio import Audio
 from .resources.chat import Chat
@@ -60,19 +61,29 @@ class RouterAI:
         max_retries: int = 2,
         retry_backoff: float = 1.0,
         retry_unsafe_methods: bool = False,
+        max_retry_after: float = 60.0,
         logger: logging.Logger | str | None = None,
         models_ttl: float = 600.0,
         http_client: httpx.Client | None = None,
         async_http_client: httpx.AsyncClient | None = None,
     ) -> None:
-        api_key = api_key or os.getenv(ENV_API_KEY)
+        if api_key is None:
+            api_key = os.getenv(ENV_API_KEY)
+        elif not api_key.strip():
+            raise ConfigurationError("api_key must not be empty or whitespace")
+        resolved_base_url = base_url
+        if resolved_base_url is None:
+            resolved_base_url = os.getenv(ENV_BASE_URL) or DEFAULT_BASE_URL
+        elif not resolved_base_url.strip():
+            raise ConfigurationError("base_url must not be empty or whitespace")
         self._http = HTTPClient(
             api_key=api_key,
-            base_url=base_url or os.getenv(ENV_BASE_URL) or DEFAULT_BASE_URL,
+            base_url=resolved_base_url,
             timeout=timeout,
             max_retries=max_retries,
             retry_backoff=retry_backoff,
             retry_unsafe_methods=retry_unsafe_methods,
+            max_retry_after=max_retry_after,
             logger=logger,
             http_client=http_client,
             async_http_client=async_http_client,
