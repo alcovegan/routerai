@@ -44,5 +44,21 @@ class RequestError(RouterAIError):
     """Raised on transport-level errors (timeout, connection failure)."""
 
 
+class StreamInterruptedError(RouterAIError):
+    """Raised when a streaming response breaks after data was already delivered.
+
+    No automatic retry is attempted in this state: the request may have been
+    billed and retrying could duplicate the generation.
+    """
+
+    def __init__(self, message: str, *, chunks_received: int = 0) -> None:
+        super().__init__(message)
+        self.chunks_received = chunks_received
+
+
+class ConfigurationError(RouterAIError):
+    """Raised when the client is configured inconsistently (e.g. wrong transport)."""
+
+
 class ModelNotFoundError(RouterAIError):
     """Raised when a model is not found in the catalog."""
