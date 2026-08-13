@@ -103,6 +103,10 @@ are never closed by the library.
 Retries honour the `Retry-After` header. Safe methods (GET/HEAD) are retried on
 429/5xx; unsafe methods only on 429 by default.
 
+The `extra` parameter is an escape hatch for provider-specific request fields:
+it can never override library-managed keys (`model`, `messages`, `stream`, ...)
+— colliding keys raise `ValueError`.
+
 ## Errors
 
 | Exception | HTTP |
