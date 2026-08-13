@@ -71,6 +71,28 @@ for chunk in client.chat.stream("openai/gpt-5.6-sol", "Расскажи сказ
 ```python
 client.audio.transcribe("openai/whisper-large-v3", "voice.wav")      # format from suffix
 client.audio.transcribe("openai/whisper-large-v3", raw_bytes, format="mp3")
+for chunk in client.audio.speech_stream("x-ai/grok-voice-tts-1.0", "текст", voice="eve"):
+    ...
+```
+
+### Video lifecycle
+
+```python
+from routerai import FrameImage, ImageReference
+
+task = client.videos.create(
+    "bytedance/seedance-2.0",
+    "Персонаж идёт через осенний лес",
+    frame_images=[FrameImage(url="https://example.com/first.png", frame_type="first_frame")],
+    # or reference-to-video: input_references=[ImageReference(url=...)]
+)
+task.wait(timeout=600, interval=5)      # absolute deadline, incl. retries
+task.save("video.mp4", index=0)         # streaming download, atomic rename
+await task.asave("video.mp4")           # async variant, cancellation-safe
+
+# webhooks: verify HMAC over the raw body with your api key
+from routerai.webhooks import verify_video
+data = verify_video(raw_body, signature, api_key, timestamp, max_age_seconds=300)
 ```
 
 ## Async
@@ -96,6 +118,7 @@ are never closed by the library.
 | `base_url` / `ROUTERAI_BASE_URL` | base URL; precedence: explicit argument > env var > `https://routerai.ru/api/v1` |
 | `timeout` | per-request timeout in seconds (default 60) |
 | `max_retries` | retry attempts with exponential backoff + jitter (default 2) |
+| `max_retry_after` | upper bound for an upstream `Retry-After` header, seconds (default 60) |
 | `retry_unsafe_methods` | retry POST/PATCH/DELETE on 5xx too (default False; RouterAI already
   does provider fallback, a client-side POST retry may start a new billed generation) |
 | `http_client` / `async_http_client` | inject external httpx transports (never closed by the library) |
@@ -119,7 +142,10 @@ it can never override library-managed keys (`model`, `messages`, `stream`, ...)
 | `NoProviderError` | 503 with "no provider available" |
 | `APIStatusError` | other 4xx/5xx (has `.status_code`, `.body`) |
 | `RequestError` | transport failure after retries |
+| `DeadlineExceededError` | an absolute polling deadline passed (video `wait()`) |
 | `StreamInterruptedError` | SSE broke after the response stream was opened (`.chunks_received` may be 0) |
+| `VideoGenerationError` | a video task reached `failed`/`cancelled`/`expired` |
+| `WebhookVerificationError` | video webhook failed signature or freshness checks |
 
 ## Logging
 
