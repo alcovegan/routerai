@@ -5,10 +5,12 @@ import time
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal
 
+import httpx
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from .._extras import merge_extra
-from ..errors import DeadlineExceededError, VideoGenerationError
+from .._urls import validate_image_source, validate_public_https_url
+from ..errors import DeadlineExceededError, RequestError, VideoGenerationError
 from ..schemas import Usage
 
 if TYPE_CHECKING:
@@ -19,69 +21,11 @@ _TERMINAL_FAILURES = {"failed", "cancelled", "expired"}
 
 
 def _validate_public_url(value: str) -> str:
-    """RouterAI image inputs accept public HTTPS URLs or data URIs only.
-
-    HTTPS URLs are validated structurally (scheme, hostname, no userinfo or
-    fragment, no loopback/private/link-local/reserved literal IPs); data
-    URIs must be ``data:image/<type>;base64,<payload>`` with strict base64.
-    This is a client-side syntax check — server-side SSRF policy remains
-    RouterAI's responsibility.
-    """
-    import base64
-    import binascii
-    import ipaddress
-    import re
-    import urllib.parse
-
-    if value.startswith("data:"):
-        match = re.fullmatch(r"data:image/[a-z0-9.+-]+;base64,([A-Za-z0-9+/]+={0,2})", value)
-        if not match:
-            raise ValueError("image data uri must look like data:image/<type>;base64,<payload>")
-        try:
-            decoded = base64.b64decode(match.group(1), validate=True)
-        except (binascii.Error, ValueError) as exc:
-            raise ValueError("image data uri carries invalid base64 payload") from exc
-        if not decoded:
-            raise ValueError("image data uri payload is empty")
-        return value
-
-    parsed = urllib.parse.urlsplit(value)
-    if parsed.scheme != "https":
-        raise ValueError(f"image url must be https, got {value[:60]!r}")
-    if not parsed.hostname:
-        raise ValueError(f"image url has no hostname: {value[:60]!r}")
-    if parsed.username or parsed.password:
-        raise ValueError("image urls with embedded credentials are not allowed")
-    if parsed.fragment:
-        raise ValueError("image urls with fragments are not allowed")
-    host = parsed.hostname.lower()
-    if host == "localhost" or host.endswith(".localhost"):
-        raise ValueError(f"image url host is not public: {host!r}")
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        return value
-    if (
-        ip.is_loopback
-        or ip.is_private
-        or ip.is_link_local
-        or ip.is_reserved
-        or ip.is_multicast
-        or ip.is_unspecified
-    ):
-        raise ValueError(f"image url host is not a public address: {host!r}")
-    return value
+    return validate_image_source(value)
 
 
 def _validate_https_callback(value: str) -> None:
-    """Callback urls must be absolute HTTPS urls without credentials."""
-    import urllib.parse
-
-    parsed = urllib.parse.urlsplit(value)
-    if parsed.scheme != "https" or not parsed.hostname:
-        raise ValueError(f"callback_url must be an absolute https url, got {value[:60]!r}")
-    if parsed.username or parsed.password:
-        raise ValueError("callback_url with embedded credentials is not allowed")
+    validate_public_https_url(value, field="callback_url")
 
 
 class FrameImage(BaseModel):
@@ -214,13 +158,16 @@ class VideoTask:
         from .._files import AtomicFileWriter
 
         self._validate_index(index)
-        with AtomicFileWriter(path, max_bytes=max_bytes) as writer:
-            with self._http.stream_request(
-                "GET", f"videos/{self.id}/content", params={"index": index}, timeout=timeout
-            ) as response:
-                for chunk in response.iter_bytes():
-                    writer.write(chunk)
-            return str(writer.commit())
+        try:
+            with AtomicFileWriter(path, max_bytes=max_bytes) as writer:
+                with self._http.stream_request(
+                    "GET", f"videos/{self.id}/content", params={"index": index}, timeout=timeout
+                ) as response:
+                    for chunk in response.iter_bytes():
+                        writer.write(chunk)
+                return str(writer.commit())
+        except httpx.RequestError as exc:
+            raise RequestError(f"video content download failed for task {self.id}") from exc
 
     async def asave(
         self,
@@ -237,7 +184,7 @@ class VideoTask:
 
         self._validate_index(index)
         writer = AtomicFileWriter(path, max_bytes=max_bytes)
-        writer.__enter__()
+        await asyncio.to_thread(writer.__enter__)
         try:
             async with self._http.astream_request(
                 "GET", f"videos/{self.id}/content", params={"index": index}, timeout=timeout
@@ -245,8 +192,11 @@ class VideoTask:
                 async for chunk in response.aiter_bytes():
                     await asyncio.to_thread(writer.write, chunk)
             await asyncio.to_thread(writer.commit)
+        except httpx.RequestError as exc:
+            await asyncio.to_thread(writer.abort)
+            raise RequestError(f"video content download failed for task {self.id}") from exc
         except BaseException:
-            await asyncio.to_thread(writer._cleanup)
+            await asyncio.to_thread(writer.abort)
             raise
         return str(writer.target)
 
