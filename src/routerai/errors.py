@@ -62,5 +62,15 @@ class ConfigurationError(RouterAIError):
     """Raised when the client is configured inconsistently (e.g. wrong transport)."""
 
 
+class VideoGenerationError(RouterAIError):
+    """Raised when a video task reaches a terminal failure state."""
+
+    def __init__(self, task_id: str, status: str, error: Any = None) -> None:
+        super().__init__(f"video task {task_id} failed with status {status!r}")
+        self.task_id = task_id
+        self.status = status
+        self.error = error
+
+
 class ModelNotFoundError(RouterAIError):
     """Raised when a model is not found in the catalog."""
