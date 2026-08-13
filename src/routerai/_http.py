@@ -65,25 +65,32 @@ def _response_body(response: httpx.Response) -> Any:
 
 
 def _error_message(response: httpx.Response) -> str:
+    """Extract the error message from a response body, or '' if there is none.
+
+    For HTTP 200 responses only JSON error payloads count — plain-text or
+    binary 200 bodies (e.g. TTS audio) are not errors.
+    """
     body = _response_body(response)
     message = _parse_error_payload(body)
-    if not message and isinstance(body, str):
+    if not message and isinstance(body, str) and response.status_code >= 400:
         message = body.strip()
-    if not message:
-        message = f"HTTP {response.status_code}"
     return message
 
 
 def _raise_for_status(response: httpx.Response, message: str) -> None:
     status = response.status_code
     if status < 400:
+        # RouterAI sometimes wraps provider errors in an HTTP 200 body
+        if message:
+            raise APIStatusError(message, status, _response_body(response))
         return
-    if status == 503 and "provider" in message.lower() and "available" in message.lower():
-        raise NoProviderError(message)
+    text = message or f"HTTP {status}"
+    if status == 503 and "provider" in text.lower() and "available" in text.lower():
+        raise NoProviderError(text)
     error_cls = _STATUS_TO_ERROR.get(status, APIStatusError)
     if error_cls is APIStatusError:
-        raise APIStatusError(message, status, _response_body(response))
-    raise error_cls(message)
+        raise APIStatusError(text, status, _response_body(response))
+    raise error_cls(text)
 
 
 def _retry_after_seconds(response: httpx.Response) -> float | None:
@@ -297,10 +304,7 @@ class HTTPClient:
                 self._wait(attempt, response)
                 continue
             self._log_result(response, method, url, elapsed)
-            _raise_for_status(
-                response,
-                _error_message(response) if response.status_code >= 400 else "",
-            )
+            _raise_for_status(response, _error_message(response))
             return response
 
         raise RequestError(f"{method} {url} failed: {mask_key(last_exc)}")
@@ -436,10 +440,7 @@ class HTTPClient:
                 await self._await(attempt, response)
                 continue
             self._log_result(response, method, url, elapsed)
-            _raise_for_status(
-                response,
-                _error_message(response) if response.status_code >= 400 else "",
-            )
+            _raise_for_status(response, _error_message(response))
             return response
 
         raise RequestError(f"{method} {url} failed: {mask_key(last_exc)}")
