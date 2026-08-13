@@ -67,13 +67,12 @@ class RouterAI:
         http_client: httpx.Client | None = None,
         async_http_client: httpx.AsyncClient | None = None,
     ) -> None:
-        if api_key is None:
-            api_key = os.getenv(ENV_API_KEY)
-        elif not api_key.strip():
+        api_key = api_key if api_key is not None else os.getenv(ENV_API_KEY)
+        if api_key is not None and not api_key.strip():
             raise ConfigurationError("api_key must not be empty or whitespace")
-        resolved_base_url = base_url
+        resolved_base_url = base_url if base_url is not None else os.getenv(ENV_BASE_URL)
         if resolved_base_url is None:
-            resolved_base_url = os.getenv(ENV_BASE_URL) or DEFAULT_BASE_URL
+            resolved_base_url = DEFAULT_BASE_URL
         elif not resolved_base_url.strip():
             raise ConfigurationError("base_url must not be empty or whitespace")
         self._http = HTTPClient(

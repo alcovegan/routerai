@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from .._extras import merge_extra
-from ..errors import RouterAIError, VideoGenerationError
+from ..errors import DeadlineExceededError, VideoGenerationError
 from ..schemas import Usage
 
 if TYPE_CHECKING:
@@ -19,12 +19,69 @@ _TERMINAL_FAILURES = {"failed", "cancelled", "expired"}
 
 
 def _validate_public_url(value: str) -> str:
-    """RouterAI image inputs accept public HTTPS URLs or data URIs only."""
+    """RouterAI image inputs accept public HTTPS URLs or data URIs only.
+
+    HTTPS URLs are validated structurally (scheme, hostname, no userinfo or
+    fragment, no loopback/private/link-local/reserved literal IPs); data
+    URIs must be ``data:image/<type>;base64,<payload>`` with strict base64.
+    This is a client-side syntax check — server-side SSRF policy remains
+    RouterAI's responsibility.
+    """
+    import base64
+    import binascii
+    import ipaddress
+    import re
+    import urllib.parse
+
     if value.startswith("data:"):
+        match = re.fullmatch(r"data:image/[a-z0-9.+-]+;base64,([A-Za-z0-9+/]+={0,2})", value)
+        if not match:
+            raise ValueError("image data uri must look like data:image/<type>;base64,<payload>")
+        try:
+            decoded = base64.b64decode(match.group(1), validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise ValueError("image data uri carries invalid base64 payload") from exc
+        if not decoded:
+            raise ValueError("image data uri payload is empty")
         return value
-    if not value.startswith("https://"):
-        raise ValueError(f"image url must be a public https url or a data uri, got {value[:60]!r}")
+
+    parsed = urllib.parse.urlsplit(value)
+    if parsed.scheme != "https":
+        raise ValueError(f"image url must be https, got {value[:60]!r}")
+    if not parsed.hostname:
+        raise ValueError(f"image url has no hostname: {value[:60]!r}")
+    if parsed.username or parsed.password:
+        raise ValueError("image urls with embedded credentials are not allowed")
+    if parsed.fragment:
+        raise ValueError("image urls with fragments are not allowed")
+    host = parsed.hostname.lower()
+    if host == "localhost" or host.endswith(".localhost"):
+        raise ValueError(f"image url host is not public: {host!r}")
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return value
+    if (
+        ip.is_loopback
+        or ip.is_private
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    ):
+        raise ValueError(f"image url host is not a public address: {host!r}")
     return value
+
+
+def _validate_https_callback(value: str) -> None:
+    """Callback urls must be absolute HTTPS urls without credentials."""
+    import urllib.parse
+
+    parsed = urllib.parse.urlsplit(value)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise ValueError(f"callback_url must be an absolute https url, got {value[:60]!r}")
+    if parsed.username or parsed.password:
+        raise ValueError("callback_url with embedded credentials is not allowed")
 
 
 class FrameImage(BaseModel):
@@ -104,13 +161,15 @@ class VideoTask:
     def cost_rub(self) -> Decimal | None:
         return self._usage.cost_rub if self._usage else None
 
-    def refresh(self, *, timeout: float | None = None) -> VideoTask:
-        response = self._http.get(f"videos/{self.id}", timeout=timeout)
+    def refresh(self, *, timeout: float | None = None, deadline: float | None = None) -> VideoTask:
+        response = self._http.get(f"videos/{self.id}", timeout=timeout, deadline=deadline)
         self._apply(self._http._json(response))
         return self
 
-    async def arefresh(self, *, timeout: float | None = None) -> VideoTask:
-        response = await self._http.aget(f"videos/{self.id}", timeout=timeout)
+    async def arefresh(
+        self, *, timeout: float | None = None, deadline: float | None = None
+    ) -> VideoTask:
+        response = await self._http.aget(f"videos/{self.id}", timeout=timeout, deadline=deadline)
         self._apply(self._http._json(response))
         return self
 
@@ -151,29 +210,17 @@ class VideoTask:
         timeout: float | None = None,
         max_bytes: int = 512 * 1024 * 1024,
     ) -> str:
-        """Stream one video output to ``path`` atomically (temp file + rename)."""
-        import os
-        import pathlib
+        """Stream one video output to ``path`` atomically (unique temp + rename)."""
+        from .._files import AtomicFileWriter
 
         self._validate_index(index)
-        target = pathlib.Path(path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_name(f".{target.name}.part")
-        total = 0
-        with (
-            self._http.stream_request(
+        with AtomicFileWriter(path, max_bytes=max_bytes) as writer:
+            with self._http.stream_request(
                 "GET", f"videos/{self.id}/content", params={"index": index}, timeout=timeout
-            ) as response,
-            tmp.open("wb") as handle,
-        ):
-            for chunk in response.iter_bytes():
-                total += len(chunk)
-                if total > max_bytes:
-                    tmp.unlink(missing_ok=True)
-                    raise RouterAIError(f"video exceeds the {max_bytes} byte save limit")
-                handle.write(chunk)
-        os.replace(tmp, target)
-        return str(target)
+            ) as response:
+                for chunk in response.iter_bytes():
+                    writer.write(chunk)
+            return str(writer.commit())
 
     async def asave(
         self,
@@ -185,31 +232,23 @@ class VideoTask:
     ) -> str:
         """Async variant of :meth:`save` (file writes run off the event loop)."""
         import asyncio
-        import os
-        import pathlib
+
+        from .._files import AtomicFileWriter
 
         self._validate_index(index)
-        target = pathlib.Path(path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_name(f".{target.name}.part")
-        total = 0
-
-        def write_chunk(chunk: bytes) -> None:
-            nonlocal total
-            with tmp.open("ab") as handle:
-                handle.write(chunk)
-            total += len(chunk)
-
-        async with self._http.astream_request(
-            "GET", f"videos/{self.id}/content", params={"index": index}, timeout=timeout
-        ) as response:
-            async for chunk in response.aiter_bytes():
-                await asyncio.to_thread(write_chunk, chunk)
-                if total > max_bytes:
-                    await asyncio.to_thread(tmp.unlink, True)
-                    raise RouterAIError(f"video exceeds the {max_bytes} byte save limit")
-        await asyncio.to_thread(os.replace, tmp, target)
-        return str(target)
+        writer = AtomicFileWriter(path, max_bytes=max_bytes)
+        writer.__enter__()
+        try:
+            async with self._http.astream_request(
+                "GET", f"videos/{self.id}/content", params={"index": index}, timeout=timeout
+            ) as response:
+                async for chunk in response.aiter_bytes():
+                    await asyncio.to_thread(writer.write, chunk)
+            await asyncio.to_thread(writer.commit)
+        except BaseException:
+            await asyncio.to_thread(writer._cleanup)
+            raise
+        return str(writer.target)
 
     def wait(
         self,
@@ -231,12 +270,11 @@ class VideoTask:
         while not self.done:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise RouterAIError(f"video task {self.id} not finished within {timeout}s")
+                raise DeadlineExceededError(
+                    f"video task {self.id} not finished within {timeout}s", budget=timeout
+                )
             time.sleep(min(interval, remaining))
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise RouterAIError(f"video task {self.id} not finished within {timeout}s")
-            self.refresh(timeout=remaining)
+            self.refresh(timeout=None, deadline=deadline)
         if self.failed and raise_on_failure:
             raise VideoGenerationError(self.id, self.status, self.error)
         return self
@@ -255,12 +293,11 @@ class VideoTask:
         while not self.done:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise RouterAIError(f"video task {self.id} not finished within {timeout}s")
+                raise DeadlineExceededError(
+                    f"video task {self.id} not finished within {timeout}s", budget=timeout
+                )
             await asyncio.sleep(min(interval, remaining))
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise RouterAIError(f"video task {self.id} not finished within {timeout}s")
-            await self.arefresh(timeout=remaining)
+            await self.arefresh(timeout=None, deadline=deadline)
         if self.failed and raise_on_failure:
             raise VideoGenerationError(self.id, self.status, self.error)
         return self
@@ -430,6 +467,8 @@ class Videos:
             body["input_references"] = [item.model_dump_wire() for item in normalized_references]
         if callback_url:
             body["callback_url"] = callback_url
+        if callback_url:
+            _validate_https_callback(callback_url)
         merge_extra(
             extra,
             reserved=(

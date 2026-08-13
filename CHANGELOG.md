@@ -6,9 +6,9 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.1.0-alpha.1] - 2026-08-13
+## [0.1.0] - 2026-08-13
 
-First public alpha.
+First public alpha (tag `v0.1.0-alpha.1`; the package version is `0.1.0`).
 
 ### Added
 

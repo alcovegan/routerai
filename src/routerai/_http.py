@@ -15,6 +15,7 @@ from .errors import (
     APIStatusError,
     AuthenticationError,
     ConfigurationError,
+    DeadlineExceededError,
     InsufficientFundsError,
     NoProviderError,
     NotFoundError,
@@ -185,6 +186,8 @@ def _retry_after_seconds(response: httpx.Response, *, max_retry_after: float) ->
     if not value:
         return None
     if value.isdigit():
+        if len(value) > 9:
+            return max_retry_after
         delay = float(int(value))
     else:
         try:
@@ -326,19 +329,29 @@ class HTTPClient:
         # so the server cannot have processed the request.
         return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout))
 
-    def _wait(self, attempt: int, response: httpx.Response | None = None) -> None:
+    def _wait(
+        self, attempt: int, response: httpx.Response | None = None, *, deadline: float | None = None
+    ) -> None:
         retry_after = (
             _retry_after_seconds(response, max_retry_after=self._max_retry_after)
             if response is not None
             else None
         )
-        if retry_after is not None:
-            time.sleep(retry_after)
-            return
-        jitter = random.uniform(0.5, 1.0)
-        time.sleep(self._retry_backoff * (2**attempt) * jitter)
+        delay = (
+            retry_after
+            if retry_after is not None
+            else (self._retry_backoff * (2**attempt) * random.uniform(0.5, 1.0))
+        )
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise DeadlineExceededError("deadline exceeded during retry backoff")
+            delay = min(delay, remaining)
+        time.sleep(delay)
 
-    async def _await(self, attempt: int, response: httpx.Response | None = None) -> None:
+    async def _await(
+        self, attempt: int, response: httpx.Response | None = None, *, deadline: float | None = None
+    ) -> None:
         import asyncio
 
         retry_after = (
@@ -346,11 +359,17 @@ class HTTPClient:
             if response is not None
             else None
         )
-        if retry_after is not None:
-            await asyncio.sleep(retry_after)
-            return
-        jitter = random.uniform(0.5, 1.0)
-        await asyncio.sleep(self._retry_backoff * (2**attempt) * jitter)
+        delay = (
+            retry_after
+            if retry_after is not None
+            else (self._retry_backoff * (2**attempt) * random.uniform(0.5, 1.0))
+        )
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise DeadlineExceededError("deadline exceeded during retry backoff")
+            delay = min(delay, remaining)
+        await asyncio.sleep(delay)
 
     def _log_result(
         self, response: httpx.Response | ResponseEnvelope, method: str, url: str, elapsed: float
@@ -398,6 +417,7 @@ class HTTPClient:
         content: bytes | None = None,
         headers: dict[str, str] | None = None,
         timeout: float | None = None,
+        deadline: float | None = None,
     ) -> ResponseEnvelope:
         url = self._build_url(path)
         request_headers = self._merge_headers(headers, content=content)
@@ -405,6 +425,12 @@ class HTTPClient:
 
         last_exc: Exception | None = None
         for attempt in range(self._max_retries + 1):
+            attempt_timeout = self._timeout if timeout is None else timeout
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise DeadlineExceededError(f"deadline exceeded before attempt {attempt + 1}")
+                attempt_timeout = min(attempt_timeout, remaining)
             started = time.monotonic()
             try:
                 response = client.request(
@@ -414,7 +440,7 @@ class HTTPClient:
                     json=json,
                     content=content,
                     headers=request_headers,
-                    timeout=self._timeout if timeout is None else timeout,
+                    timeout=attempt_timeout,
                 )
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 last_exc = exc
@@ -422,7 +448,7 @@ class HTTPClient:
                     self._logger.warning(
                         "retry %s %s after %s (attempt %d)", method, url, mask_key(exc), attempt + 1
                     )
-                    self._wait(attempt)
+                    self._wait(attempt, deadline=deadline)
                     continue
                 break
             elapsed = time.monotonic() - started
@@ -545,6 +571,7 @@ class HTTPClient:
         content: bytes | None = None,
         headers: dict[str, str] | None = None,
         timeout: float | None = None,
+        deadline: float | None = None,
     ) -> ResponseEnvelope:
         url = self._build_url(path)
         request_headers = self._merge_headers(headers, content=content)
@@ -552,6 +579,12 @@ class HTTPClient:
 
         last_exc: Exception | None = None
         for attempt in range(self._max_retries + 1):
+            attempt_timeout = self._timeout if timeout is None else timeout
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise DeadlineExceededError(f"deadline exceeded before attempt {attempt + 1}")
+                attempt_timeout = min(attempt_timeout, remaining)
             started = time.monotonic()
             try:
                 response = await client.request(
@@ -561,7 +594,7 @@ class HTTPClient:
                     json=json,
                     content=content,
                     headers=request_headers,
-                    timeout=self._timeout if timeout is None else timeout,
+                    timeout=attempt_timeout,
                 )
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 last_exc = exc
@@ -569,7 +602,7 @@ class HTTPClient:
                     self._logger.warning(
                         "retry %s %s after %s (attempt %d)", method, url, mask_key(exc), attempt + 1
                     )
-                    await self._await(attempt)
+                    await self._await(attempt, deadline=deadline)
                     continue
                 break
             elapsed = time.monotonic() - started
