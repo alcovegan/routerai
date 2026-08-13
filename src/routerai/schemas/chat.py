@@ -4,7 +4,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from .usage import Usage
 
@@ -34,11 +34,12 @@ class Message(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    role: str
+    role: str | None = None
     content: Any = None
     name: str | None = None
     tool_calls: list[Any] | None = None
     tool_call_id: str | None = None
+    reasoning_content: Any = None
 
 
 class ToolCall(BaseModel):
@@ -66,22 +67,29 @@ class ChatResponse(BaseModel):
     id: str | None = None
     model: str | None = None
     created: int | None = None
-    choices: list[Choice] = []
+    choices: list[Choice] = Field(default_factory=list)
     usage: Usage | None = None
     service_tier: str | None = None
     generation_id: str | None = None
 
 
 class ChatResult(BaseModel):
-    """Convenience wrapper around a chat completion."""
+    """Typed wrapper around a chat completion.
 
-    model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
+    ``choices`` preserves every alternative returned by the API (e.g. when
+    ``n > 1``); the convenience fields ``content``, ``reasoning``,
+    ``tool_calls`` and ``finish_reason`` refer to ``choices[0]`` only.
+    """
+
+    model_config = ConfigDict(extra="allow")
 
     id: str | None = None
     model: str | None = None
+    created: int | None = None
+    choices: list[Choice] = Field(default_factory=list)
     content: str | None = None
     reasoning: str | None = None
-    tool_calls: list[ToolCall] = []
+    tool_calls: list[ToolCall] = Field(default_factory=list)
     finish_reason: str | None = None
     usage: Usage | None = None
     service_tier: str | None = None
@@ -90,36 +98,59 @@ class ChatResult(BaseModel):
 
     @classmethod
     def from_response(cls, payload: dict[str, Any], generation_id: str | None = None) -> ChatResult:
-        content_parts: list[str] = []
-        reasoning_parts: list[str] = []
-        tool_calls: list[ToolCall] = []
-        finish_reason: str | None = None
-
-        for choice in payload.get("choices") or []:
-            message = choice.get("message") or {}
-            finish_reason = choice.get("finish_reason") or finish_reason
-            if isinstance(message.get("content"), str):
-                content_parts.append(message["content"])
-            if isinstance(message.get("reasoning_content"), str):
-                reasoning_parts.append(message["reasoning_content"])
-            for call in message.get("tool_calls") or []:
-                function = call.get("function") or {}
-                tool_calls.append(
-                    ToolCall(
-                        id=call.get("id", ""),
-                        type=call.get("type", "function"),
-                        name=function.get("name"),
-                        arguments=function.get("arguments"),
-                    )
+        choices = []
+        for item in payload.get("choices") or []:
+            message_payload = item.get("message")
+            message = (
+                Message.model_validate(message_payload)
+                if isinstance(message_payload, dict)
+                else None
+            )
+            choices.append(
+                Choice(
+                    index=item.get("index", 0),
+                    message=message,
+                    finish_reason=item.get("finish_reason"),
                 )
+            )
+
+        first = choices[0] if choices else None
+        first_message = first.message if first else None
+
+        content: str | None = None
+        if first_message is not None and isinstance(first_message.content, str):
+            content = first_message.content
+        reasoning: str | None = None
+        if first_message is not None:
+            for key in ("reasoning_content", "reasoning"):
+                value = getattr(first_message, key, None)
+                if value is None and first_message.model_extra:
+                    value = first_message.model_extra.get(key)
+                if isinstance(value, str):
+                    reasoning = value
+                    break
+
+        tool_calls = []
+        for call in (first_message.tool_calls if first_message else None) or []:
+            function = call.get("function") or {}
+            tool_calls.append(
+                ToolCall(
+                    id=call.get("id", ""),
+                    type=call.get("type", "function"),
+                    name=function.get("name"),
+                    arguments=function.get("arguments"),
+                )
+            )
 
         return cls(
             id=payload.get("id"),
             model=payload.get("model"),
-            content="\n".join(part for part in content_parts if part) or None,
-            reasoning="\n".join(part for part in reasoning_parts if part) or None,
+            created=payload.get("created"),
+            choices=choices,
+            content=content,
+            reasoning=reasoning,
             tool_calls=tool_calls,
-            finish_reason=finish_reason,
+            finish_reason=first.finish_reason if first else None,
             usage=Usage.model_validate(payload["usage"]) if payload.get("usage") else None,
             service_tier=payload.get("service_tier"),
             generation_id=generation_id,

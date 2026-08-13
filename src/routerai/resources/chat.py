@@ -1,27 +1,38 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Sequence
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
-from ..errors import RouterAIError
+import httpx
+
+from ..errors import RouterAIError, StreamInterruptedError
 from ..schemas import ChatResult, ProviderSelection, ServiceTier, Usage
 
 if TYPE_CHECKING:
     from .._http import HTTPClient
 
-MessageInput = dict[str, Any] | str
+MessageInput = dict[str, Any]
 
 
-def _messages(prompt: str | list[MessageInput], system: str | None = None) -> list[dict[str, Any]]:
+def _messages(
+    prompt: str | Sequence[MessageInput], system: str | None = None
+) -> list[dict[str, Any]]:
     if isinstance(prompt, str):
         messages: list[dict[str, Any]] = []
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
         return messages
-    messages = [dict(m) for m in prompt if isinstance(m, dict)]
+    messages = []
+    for index, message in enumerate(prompt):
+        if not isinstance(message, dict):
+            raise ValueError(
+                f"message at index {index} must be a dict, got {type(message).__name__}; "
+                "string shorthand is only supported for the whole prompt"
+            )
+        messages.append(dict(message))
     if system and not any(m.get("role") == "system" for m in messages):
         messages.insert(0, {"role": "system", "content": system})
     return messages
@@ -36,7 +47,7 @@ class Chat:
     def complete(
         self,
         model: str,
-        prompt: str | list[MessageInput],
+        prompt: str | Sequence[MessageInput],
         *,
         system: str | None = None,
         max_tokens: int | None = None,
@@ -77,7 +88,7 @@ class Chat:
     async def acomplete(
         self,
         model: str,
-        prompt: str | list[MessageInput],
+        prompt: str | Sequence[MessageInput],
         *,
         system: str | None = None,
         max_tokens: int | None = None,
@@ -113,7 +124,7 @@ class Chat:
     def _build_body(
         self,
         model: str,
-        prompt: str | list[MessageInput],
+        prompt: str | Sequence[MessageInput],
         *,
         system: str | None,
         max_tokens: int | None,
@@ -159,7 +170,7 @@ class Chat:
     def stream(
         self,
         model: str,
-        prompt: str | list[MessageInput],
+        prompt: str | Sequence[MessageInput],
         *,
         system: str | None = None,
         max_tokens: int | None = None,
@@ -193,7 +204,7 @@ class Chat:
     async def astream(
         self,
         model: str,
-        prompt: str | list[MessageInput],
+        prompt: str | Sequence[MessageInput],
         *,
         system: str | None = None,
         max_tokens: int | None = None,
@@ -280,30 +291,46 @@ class StreamChunk:
 
 
 def _iter_sse(response: Any, *, http: HTTPClient) -> Iterator[StreamChunk]:
-    for line in response.iter_lines():
-        if not line or not line.startswith("data:"):
-            continue
-        data = line[5:].strip()
-        if data == "[DONE]":
-            break
-        try:
-            payload = json.loads(data)
-        except json.JSONDecodeError as exc:
-            http.logger.debug("skip unparsable SSE line: %r", data)
-            raise RouterAIError(f"unparsable SSE line: {data!r}") from exc
-        yield StreamChunk(payload)
+    chunks_received = 0
+    try:
+        for line in response.iter_lines():
+            if not line or not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                payload = json.loads(data)
+            except json.JSONDecodeError as exc:
+                http.logger.debug("skip unparsable SSE line: %r", data)
+                raise RouterAIError(f"unparsable SSE line: {data!r}") from exc
+            chunks_received += 1
+            yield StreamChunk(payload)
+    except (httpx.TimeoutException, httpx.TransportError) as exc:
+        raise StreamInterruptedError(
+            f"stream interrupted after {chunks_received} chunks: {exc}",
+            chunks_received=chunks_received,
+        ) from exc
 
 
 async def _aiter_sse(response: Any, *, http: HTTPClient) -> AsyncIterator[StreamChunk]:
-    async for line in response.aiter_lines():
-        if not line or not line.startswith("data:"):
-            continue
-        data = line[5:].strip()
-        if data == "[DONE]":
-            break
-        try:
-            payload = json.loads(data)
-        except json.JSONDecodeError as exc:
-            http.logger.debug("skip unparsable SSE line: %r", data)
-            raise RouterAIError(f"unparsable SSE line: {data!r}") from exc
-        yield StreamChunk(payload)
+    chunks_received = 0
+    try:
+        async for line in response.aiter_lines():
+            if not line or not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                payload = json.loads(data)
+            except json.JSONDecodeError as exc:
+                http.logger.debug("skip unparsable SSE line: %r", data)
+                raise RouterAIError(f"unparsable SSE line: {data!r}") from exc
+            chunks_received += 1
+            yield StreamChunk(payload)
+    except (httpx.TimeoutException, httpx.TransportError) as exc:
+        raise StreamInterruptedError(
+            f"stream interrupted after {chunks_received} chunks: {exc}",
+            chunks_received=chunks_received,
+        ) from exc
