@@ -37,28 +37,64 @@ class GeneratedImage:
         return path
 
     def download(
-        self, path: str | Path, *, timeout: float = 60.0, max_bytes: int = 50 * 1024 * 1024
+        self,
+        path: str | Path,
+        *,
+        timeout: float = 60.0,
+        max_bytes: int = 50 * 1024 * 1024,
+        max_redirects: int = 5,
     ) -> Path:
-        """Download a url-based image explicitly (HTTPS only, size-limited)."""
-        if not self.url:
-            raise RouterAIError("image has no url; use save() for inline data")
-        if not self.url.startswith("https://"):
-            raise RouterAIError(f"refusing to download non-https url: {self.url!r}")
+        """Download a url-based image explicitly (HTTPS only, size-limited).
+
+        Redirects are followed manually and every hop must stay on HTTPS;
+        data is streamed into a temp file and atomically renamed into place.
+        """
+        import os
+        import urllib.parse
+
         import httpx
 
-        with httpx.stream("GET", self.url, timeout=timeout, follow_redirects=True) as response:
-            response.raise_for_status()
-            chunks: list[bytes] = []
-            total = 0
-            for chunk in response.iter_bytes():
-                total += len(chunk)
-                if total > max_bytes:
-                    raise RouterAIError(f"image exceeds the {max_bytes} byte download limit")
-                chunks.append(chunk)
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(b"".join(chunks))
-        return path
+        if not self.url:
+            raise RouterAIError("image has no url; use save() for inline data")
+
+        url = self.url
+        with httpx.Client(timeout=timeout, follow_redirects=False) as client:
+            for _ in range(max_redirects + 1):
+                _validate_https_url(url)
+                response = client.get(url)
+                if response.status_code in (301, 302, 303, 307, 308):
+                    location = response.headers.get("Location")
+                    if not location:
+                        raise RouterAIError(f"redirect from {url!r} without a Location header")
+                    url = urllib.parse.urljoin(url, location)
+                    continue
+                response.raise_for_status()
+                path = Path(path)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = path.with_name(f".{path.name}.part")
+                total = 0
+                with tmp.open("wb") as handle:
+                    for chunk in response.iter_bytes():
+                        total += len(chunk)
+                        if total > max_bytes:
+                            tmp.unlink(missing_ok=True)
+                            raise RouterAIError(
+                                f"image exceeds the {max_bytes} byte download limit"
+                            )
+                        handle.write(chunk)
+                os.replace(tmp, path)
+                return path
+        raise RouterAIError(f"too many redirects while downloading {self.url!r}")
+
+
+def _validate_https_url(url: str) -> None:
+    import urllib.parse
+
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != "https":
+        raise RouterAIError(f"refusing to download non-https url: {url!r}")
+    if parsed.username or parsed.password:
+        raise RouterAIError("image urls with embedded credentials are not allowed")
 
 
 class ImageResult:
@@ -149,7 +185,7 @@ class Images:
             body["quality"] = quality
         if input_references:
             body["input_references"] = input_references
-        merge_extra(extra, reserved=("model", "prompt", "n"))
+        merge_extra(extra, reserved=("model", "prompt", "n", "size", "quality", "input_references"))
         if extra:
             body.update(extra)
         return body

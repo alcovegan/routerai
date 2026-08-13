@@ -16,7 +16,21 @@ if TYPE_CHECKING:
 
 MessageInput = dict[str, Any]
 
-RESERVED_BODY_KEYS = ("model", "messages", "stream")
+RESERVED_BODY_KEYS = (
+    "model",
+    "messages",
+    "stream",
+    "system",
+    "max_tokens",
+    "temperature",
+    "top_p",
+    "tools",
+    "tool_choice",
+    "response_format",
+    "service_tier",
+    "provider",
+    "stop",
+)
 
 
 def _messages(
@@ -314,15 +328,27 @@ def _parse_sse_event(data: str, chunks_received: int) -> dict[str, Any] | None:
         raise RouterAIError(f"unparsable SSE line: {data!r}") from exc
     error = payload.get("error") if isinstance(payload, dict) else None
     if error:
-        status_code = 200
-        if isinstance(error, dict):
-            status_code = int(error.get("status_code") or payload.get("status_code") or 200)
         raise APIStatusError(
             str(error.get("message", error) if isinstance(error, dict) else error),
-            status_code,
+            _safe_status(error if isinstance(error, dict) else payload),
             dict(payload),
         )
     return dict(payload)
+
+
+def _safe_status(payload: dict[str, Any]) -> int:
+    """Normalize an SSE error status_code; malformed values default to 502."""
+    for key in ("status_code", "status"):
+        value = payload.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int) and 100 <= value <= 599:
+            return value
+        if isinstance(value, str) and value.isdigit():
+            number = int(value)
+            if 100 <= number <= 599:
+                return number
+    return 502
 
 
 def _iter_sse(
