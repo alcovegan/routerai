@@ -62,3 +62,6 @@ plugins = ["pydantic.mypy"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "live: run against the real RouterAI API (requires ROUTERAI_API_KEY env var)",
+]
