@@ -200,6 +200,10 @@ class Models:
         return ModelDetail.model_validate(response.json()["data"])
 
 
+Models.list = Models.all  # type: ignore[attr-defined]  # alias for Models.all()
+Models.alist = Models.aall  # type: ignore[attr-defined]
+
+
 def _normalize_capabilities(values: Iterable[str | Capability] | None) -> set[Capability]:
     if values is None:
         return set()
