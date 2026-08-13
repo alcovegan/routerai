@@ -15,6 +15,7 @@ from routerai.errors import (
     APIStatusError,
     AuthenticationError,
     ConfigurationError,
+    DeadlineExceededError,
     RouterAIError,
     StreamInterruptedError,
     WebhookVerificationError,
@@ -713,7 +714,7 @@ def test_video_wait_timeout_respected(respx_mock):
     client = RouterAI(api_key="sk-test")
     task = client.videos.create("m", "p")
     started = time.monotonic()
-    with pytest.raises(RouterAIError, match="not finished"):
+    with pytest.raises(DeadlineExceededError):
         task.wait(timeout=0.05, interval=0.1)
     elapsed = time.monotonic() - started
     assert elapsed < 0.3
@@ -1020,7 +1021,7 @@ def test_video_wait_bounds_slow_refresh(respx_mock):
     )
     client = RouterAI(api_key="sk-test", timeout=10)
     task = client.videos.create("m", "p")
-    with pytest.raises(RouterAIError, match="not finished"):
+    with pytest.raises(DeadlineExceededError):
         task.wait(timeout=0.05, interval=0.02)
     client.close()
 
@@ -1443,3 +1444,203 @@ def test_webhook_verify_rejects_malformed_timestamp():
 
     with pytest.raises(WebhookVerificationError):
         verify_video(b'{"id":"v1"}', "sig", "sk-a", "not-a-timestamp")
+
+
+# --- audit 5: real-stream tests, deadline, atomic files, validation ---
+
+
+def test_image_download_does_not_over_read(respx_mock, tmp_path):
+    """The byte limit must stop the stream before the next chunk is read."""
+
+    class FailAfterSecondChunk(httpx.SyncByteStream):
+        def __iter__(self):
+            yield b"x" * 100
+            raise RuntimeError("second chunk must never be consumed")
+
+    respx_mock.get("https://provider.example/image").mock(
+        return_value=httpx.Response(200, stream=FailAfterSecondChunk())
+    )
+    from routerai.resources.images import GeneratedImage
+
+    image = GeneratedImage(url="https://provider.example/image")
+    with pytest.raises(RouterAIError, match="exceeds"):
+        image.download(tmp_path / "i.png", max_bytes=50)
+    assert not (tmp_path / "i.png").exists()
+    assert not list(tmp_path.glob(".i.png.*"))
+
+
+def test_image_download_content_length_precheck(respx_mock, tmp_path):
+    import httpx as _httpx
+
+    respx_mock.get("https://provider.example/image").mock(
+        return_value=_httpx.Response(
+            200, headers={"Content-Length": "999999999"}, stream=httpx.SyncByteStream()
+        )
+    )
+    from routerai.resources.images import GeneratedImage
+
+    image = GeneratedImage(url="https://provider.example/image")
+    with pytest.raises(RouterAIError, match="content-length"):
+        image.download(tmp_path / "i.png", max_bytes=1024)
+    assert not (tmp_path / "i.png").exists()
+
+
+def test_image_download_cleans_temp_on_midstream_failure(respx_mock, tmp_path):
+    class FailingStream(httpx.SyncByteStream):
+        def __iter__(self):
+            yield b"partial"
+            raise httpx.ReadError("connection lost")
+
+    respx_mock.get("https://provider.example/image").mock(
+        return_value=httpx.Response(200, stream=FailingStream())
+    )
+    from routerai.resources.images import GeneratedImage
+
+    image = GeneratedImage(url="https://provider.example/image")
+    with pytest.raises(httpx.ReadError):
+        image.download(tmp_path / "i.png")
+    assert not (tmp_path / "i.png").exists()
+    assert not list(tmp_path.glob(".i.png.*"))
+
+
+async def test_video_asave_does_not_append_stale_part(respx_mock, tmp_path):
+    target = tmp_path / "out.mp4"
+    target.write_bytes(b"stale-target")
+    respx_mock.post("https://routerai.ru/api/v1/videos").mock(
+        return_value=httpx_response({"id": "v1", "status": "pending"})
+    )
+    client = RouterAI(api_key="sk-test")
+    task = client.videos.create("m", "p")
+    task._apply({"id": "v1", "status": "completed", "unsigned_urls": ["https://x/0.mp4"]})
+    respx_mock.get("https://routerai.ru/api/v1/videos/v1/content?index=0").mock(
+        return_value=httpx_response(b"fresh")
+    )
+    await task.asave(str(target))
+    with open(target, "rb") as handle:
+        assert handle.read() == b"fresh"
+    assert not list(tmp_path.glob(".out.mp4.*"))
+    await client.aclose()
+
+
+async def test_video_asave_cleans_temp_on_failure(respx_mock, tmp_path):
+    class FailingAsyncStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"partial"
+            raise httpx.ReadError("connection lost")
+
+    respx_mock.post("https://routerai.ru/api/v1/videos").mock(
+        return_value=httpx_response({"id": "v1", "status": "pending"})
+    )
+    client = RouterAI(api_key="sk-test")
+    task = client.videos.create("m", "p")
+    task._apply({"id": "v1", "status": "completed", "unsigned_urls": ["https://x/0.mp4"]})
+    respx_mock.get("https://routerai.ru/api/v1/videos/v1/content?index=0").mock(
+        return_value=httpx.Response(200, stream=FailingAsyncStream())
+    )
+    with pytest.raises(httpx.ReadError):
+        await task.asave(str(tmp_path / "out.mp4"))
+    assert not (tmp_path / "out.mp4").exists()
+    assert not list(tmp_path.glob(".out.mp4.*"))
+    await client.aclose()
+
+
+def test_video_wait_deadline_bounds_retries(respx_mock):
+    """Per-attempt timeouts must not exceed the remaining deadline budget."""
+
+    def handler(request):
+        return httpx_response({"id": "v1", "status": "pending"})
+
+    respx_mock.post("https://routerai.ru/api/v1/videos").mock(
+        return_value=httpx_response({"id": "v1", "status": "pending"})
+    )
+    respx_mock.get("https://routerai.ru/api/v1/videos/v1").mock(side_effect=handler)
+    client = RouterAI(api_key="sk-test", max_retries=2, retry_backoff=0.01)
+    task = client.videos.create("m", "p")
+    with pytest.raises(DeadlineExceededError):
+        task.wait(timeout=0.05, interval=0.001)
+    client.close()
+
+
+def test_retry_after_huge_integer_clamped(respx_mock):
+    route = respx_mock.get("https://routerai.ru/api/v1/models").mock(
+        side_effect=[
+            httpx_response(
+                {"error": "slow down"},
+                status_code=429,
+                headers={"Retry-After": "9" * 400},
+            ),
+            httpx_response({"data": []}),
+        ]
+    )
+    client = RouterAI(api_key="sk-test", max_retries=2, retry_backoff=0.01, max_retry_after=0.05)
+    client.models.all()
+    assert route.call_count == 2
+    client.close()
+
+
+def test_sse_error_root_level_status(respx_mock):
+    respx_mock.post("https://routerai.ru/api/v1/chat/completions").mock(
+        return_value=httpx_response(b'data: {"status_code":401,"error":{"message":"bad key"}}\n\n')
+    )
+    client = RouterAI(api_key="sk-test", max_retries=0)
+    with pytest.raises(APIStatusError) as exc_info:
+        list(client.chat.stream("m", "x"))
+    assert exc_info.value.status_code == 401
+    client.close()
+
+
+def test_sse_error_nested_wins_over_root(respx_mock):
+    respx_mock.post("https://routerai.ru/api/v1/chat/completions").mock(
+        return_value=httpx_response(
+            b'data: {"status_code":401,"error":{"message":"boom","status_code":500}}\n\n'
+        )
+    )
+    client = RouterAI(api_key="sk-test", max_retries=0)
+    with pytest.raises(APIStatusError) as exc_info:
+        list(client.chat.stream("m", "x"))
+    assert exc_info.value.status_code == 500
+    client.close()
+
+
+def test_video_url_validation_strict():
+    from pydantic import ValidationError
+
+    from routerai import FrameImage
+
+    for bad in (
+        "data:not-an-image-or-base64",
+        "https://",
+        "https://user:pass@localhost/image.png",
+        "http://example.com/image.png",
+        "https://127.0.0.1/image.png",
+        "https://10.0.0.5/image.png",
+        "https://169.254.1.1/image.png",
+        "https://example.com/image.png#frag",
+    ):
+        with pytest.raises(ValidationError):
+            FrameImage(url=bad)
+
+    ok = FrameImage(url="https://example.com/image.png")
+    assert ok.url == "https://example.com/image.png"
+    ok_data = FrameImage(url="data:image/png;base64,aGVsbG8=")
+    assert ok_data.url.startswith("data:image/png;base64,")
+
+
+def test_video_callback_url_validated(respx_mock):
+    client = RouterAI(api_key="sk-test")
+    with pytest.raises(ValueError, match="callback_url"):
+        client.videos.create("m", "p", callback_url="http://example.com/hook")
+    with pytest.raises(ValueError, match="callback_url"):
+        client.videos.create("m", "p", callback_url="https://user:pass@example.com/hook")
+    assert respx_mock.calls.call_count == 0
+    client.close()
+
+
+def test_env_whitespace_values_rejected(monkeypatch):
+    monkeypatch.setenv("ROUTERAI_API_KEY", "   ")
+    with pytest.raises(ConfigurationError, match="api_key"):
+        RouterAI()
+    monkeypatch.setenv("ROUTERAI_API_KEY", "sk-ok")
+    monkeypatch.setenv("ROUTERAI_BASE_URL", "   ")
+    with pytest.raises(ConfigurationError, match="base_url"):
+        RouterAI()
