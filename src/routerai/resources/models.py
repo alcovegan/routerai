@@ -1,0 +1,213 @@
+from __future__ import annotations
+
+import threading
+import time
+from collections.abc import Iterable
+from typing import TYPE_CHECKING
+
+from ..errors import ModelNotFoundError
+from ..schemas import Capability, Model, ModelDetail
+
+if TYPE_CHECKING:
+    from .._http import HTTPClient
+
+_DEFAULT_TTL = 600.0
+
+
+class Models:
+    """Catalog of available models: listing, lookup, search, grouping.
+
+    All listing methods hit ``GET /api/v1/models`` (no auth required) and
+    cache the result for ``ttl`` seconds. Search is performed client-side
+    because the upstream endpoint ignores query filters.
+    """
+
+    def __init__(self, http: HTTPClient, *, ttl: float = _DEFAULT_TTL) -> None:
+        self._http = http
+        self._ttl = ttl
+        self._cache: list[Model] | None = None
+        self._fetched_at: float | None = None
+        self._lock = threading.Lock()
+
+    # --- cache ---
+
+    def _refresh_if_stale(self) -> None:
+        now = time.monotonic()
+        if (
+            self._cache is not None
+            and self._fetched_at is not None
+            and now - self._fetched_at < self._ttl
+        ):
+            return
+        with self._lock:
+            now = time.monotonic()
+            if (
+                self._cache is not None
+                and self._fetched_at is not None
+                and now - self._fetched_at < self._ttl
+            ):
+                return
+            response = self._http.get("models")
+            data = response.json()["data"]
+            self._cache = [Model.model_validate(item) for item in data]
+            self._fetched_at = now
+
+    def clear_cache(self) -> None:
+        self._cache = None
+        self._fetched_at = None
+
+    # --- listing ---
+
+    def all(self, *, force_refresh: bool = False) -> list[Model]:
+        """Return the full catalog of models."""
+        if force_refresh:
+            self.clear_cache()
+        self._refresh_if_stale()
+        assert self._cache is not None
+        return list(self._cache)
+
+    async def aall(self, *, force_refresh: bool = False) -> list[Model]:
+        if force_refresh or self._cache is None or self._fetched_at is None:
+            response = await self._http.aget("models")
+            self._cache = [Model.model_validate(item) for item in response.json()["data"]]
+            self._fetched_at = time.monotonic()
+        return list(self._cache)
+
+    def get(self, model_id: str) -> Model:
+        """Return a model by its exact id, e.g. ``"deepseek/deepseek-v4-pro"``."""
+        for model in self.all():
+            if model.id == model_id:
+                return model
+        raise ModelNotFoundError(f"model '{model_id}' not found in catalog")
+
+    async def aget(self, model_id: str) -> Model:
+        for model in await self.aall():
+            if model.id == model_id:
+                return model
+        raise ModelNotFoundError(f"model '{model_id}' not found in catalog")
+
+    # --- search ---
+
+    def search(
+        self,
+        q: str | None = None,
+        *,
+        input_modalities: Iterable[str] | None = None,
+        output_modalities: Iterable[str] | None = None,
+        capabilities: Iterable[str | Capability] | None = None,
+        developer: str | None = None,
+        min_context: int | None = None,
+        max_price_prompt: float | None = None,
+        max_price_completion: float | None = None,
+        reasoning: bool | None = None,
+        tools: bool | None = None,
+    ) -> list[Model]:
+        """Client-side search over the catalog.
+
+        Args:
+            q: case-insensitive substring matched against id, name, description.
+            input_modalities/output_modalities: filter by architecture modalities.
+            capabilities: models must have ALL listed capabilities.
+            developer: match the model author (the part of id before "/").
+            min_context: minimal context length in tokens.
+            max_price_prompt/max_price_completion: max price in rubles per 1M tokens.
+            reasoning/tools: shortcuts for capability filters.
+        """
+        results: list[Model] = []
+        caps = _normalize_capabilities(capabilities)
+        if reasoning is True:
+            caps |= {Capability.REASONING}
+        if tools is True:
+            caps |= {Capability.TOOLS}
+
+        for model in self.all():
+            if q and not _matches_query(model, q.lower()):
+                continue
+            if developer and model.author.lower() != developer.lower():
+                continue
+            if input_modalities is not None:
+                wanted = set(input_modalities)
+                if not wanted.issubset(set(model.architecture.input_modalities)):
+                    continue
+            if output_modalities is not None:
+                wanted = set(output_modalities)
+                if not wanted.issubset(set(model.architecture.output_modalities)):
+                    continue
+            if caps and not caps.issubset(model.capabilities):
+                continue
+            if min_context and (model.context_length is None or model.context_length < min_context):
+                continue
+            if max_price_prompt is not None:
+                price = model.pricing.per_million("prompt")
+                if price is None or price > max_price_prompt:
+                    continue
+            if max_price_completion is not None:
+                price = model.pricing.per_million("completion")
+                if price is None or price > max_price_completion:
+                    continue
+            results.append(model)
+        return results
+
+    # --- capabilities ---
+
+    def by_capability(self, capability: str | Capability) -> list[Model]:
+        cap = Capability(capability)
+        return [m for m in self.all() if cap in m.capabilities]
+
+    def grouped(self) -> dict[Capability, list[Model]]:
+        """Group all models by capability (a model may appear in several groups)."""
+        grouped: dict[Capability, list[Model]] = {cap: [] for cap in Capability}
+        for model in self.all():
+            for cap in model.capabilities:
+                grouped[cap].append(model)
+        return {cap: models for cap, models in grouped.items() if models}
+
+    def text(self) -> list[Model]:
+        return self.by_capability(Capability.TEXT)
+
+    def reasoning(self) -> list[Model]:
+        return self.by_capability(Capability.REASONING)
+
+    def vision(self) -> list[Model]:
+        return self.by_capability(Capability.VISION)
+
+    def image_generation(self) -> list[Model]:
+        return self.by_capability(Capability.IMAGE_GENERATION)
+
+    def embeddings(self) -> list[Model]:
+        return self.by_capability(Capability.EMBEDDINGS)
+
+    def rerank(self) -> list[Model]:
+        return self.by_capability(Capability.RERANK)
+
+    def speech(self) -> list[Model]:
+        return self.by_capability(Capability.SPEECH)
+
+    def transcription(self) -> list[Model]:
+        return self.by_capability(Capability.TRANSCRIPTION)
+
+    # --- endpoints ---
+
+    def endpoints(self, model_id: str) -> ModelDetail:
+        """Provider endpoints for a model: slugs, prices, limits, status."""
+        author, slug = model_id.split("/", 1)
+        response = self._http.get(f"models/{author}/{slug}/endpoints")
+        return ModelDetail.model_validate(response.json()["data"])
+
+    async def aendpoints(self, model_id: str) -> ModelDetail:
+        author, slug = model_id.split("/", 1)
+        response = await self._http.aget(f"models/{author}/{slug}/endpoints")
+        return ModelDetail.model_validate(response.json()["data"])
+
+
+def _normalize_capabilities(values: Iterable[str | Capability] | None) -> set[Capability]:
+    if values is None:
+        return set()
+    return {Capability(v) for v in values}
+
+
+def _matches_query(model: Model, q: str) -> bool:
+    haystack = " ".join(
+        part for part in (model.id, model.name or "", model.description or "") if part
+    ).lower()
+    return q in haystack
