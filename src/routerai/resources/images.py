@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+from collections.abc import AsyncIterator, Iterator
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -124,11 +125,17 @@ class Images:
     def generate(
         self,
         model: str,
-        prompt: str,
+        prompt: str | None = None,
         *,
         n: int = 1,
         size: str | None = None,
         quality: str | None = None,
+        aspect_ratio: str | None = None,
+        resolution: str | None = None,
+        background: str | None = None,
+        output_format: str | None = None,
+        output_compression: int | None = None,
+        seed: int | None = None,
         input_references: list[Any] | None = None,
         extra: dict[str, Any] | None = None,
     ) -> ImageResult:
@@ -138,6 +145,12 @@ class Images:
             n=n,
             size=size,
             quality=quality,
+            aspect_ratio=aspect_ratio,
+            resolution=resolution,
+            background=background,
+            output_format=output_format,
+            output_compression=output_compression,
+            seed=seed,
             input_references=input_references,
             extra=extra,
         )
@@ -147,11 +160,17 @@ class Images:
     async def agenerate(
         self,
         model: str,
-        prompt: str,
+        prompt: str | None = None,
         *,
         n: int = 1,
         size: str | None = None,
         quality: str | None = None,
+        aspect_ratio: str | None = None,
+        resolution: str | None = None,
+        background: str | None = None,
+        output_format: str | None = None,
+        output_compression: int | None = None,
+        seed: int | None = None,
         input_references: list[Any] | None = None,
         extra: dict[str, Any] | None = None,
     ) -> ImageResult:
@@ -161,31 +180,154 @@ class Images:
             n=n,
             size=size,
             quality=quality,
+            aspect_ratio=aspect_ratio,
+            resolution=resolution,
+            background=background,
+            output_format=output_format,
+            output_compression=output_compression,
+            seed=seed,
             input_references=input_references,
             extra=extra,
         )
         response = await self._http.apost("images", json=body)
         return self._parse(response)
 
+    def stream(
+        self,
+        model: str,
+        prompt: str | None = None,
+        *,
+        n: int = 1,
+        size: str | None = None,
+        quality: str | None = None,
+        aspect_ratio: str | None = None,
+        resolution: str | None = None,
+        background: str | None = None,
+        output_format: str | None = None,
+        output_compression: int | None = None,
+        seed: int | None = None,
+        input_references: list[Any] | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> Iterator[ImageStreamChunk]:
+        """Streaming generation: partial previews then a completed event."""
+        body = self._body(
+            model,
+            prompt,
+            n=n,
+            size=size,
+            quality=quality,
+            aspect_ratio=aspect_ratio,
+            resolution=resolution,
+            background=background,
+            output_format=output_format,
+            output_compression=output_compression,
+            seed=seed,
+            input_references=input_references,
+            extra=extra,
+        )
+        body["stream"] = True
+        with self._http.stream_request("POST", "images", json=body) as response:
+            yield from _iter_image_sse(
+                response, http=self._http, generation_id=response.headers.get("X-Generation-Id")
+            )
+
+    async def astream(
+        self,
+        model: str,
+        prompt: str | None = None,
+        *,
+        n: int = 1,
+        size: str | None = None,
+        quality: str | None = None,
+        aspect_ratio: str | None = None,
+        resolution: str | None = None,
+        background: str | None = None,
+        output_format: str | None = None,
+        output_compression: int | None = None,
+        seed: int | None = None,
+        input_references: list[Any] | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> AsyncIterator[ImageStreamChunk]:
+        body = self._body(
+            model,
+            prompt,
+            n=n,
+            size=size,
+            quality=quality,
+            aspect_ratio=aspect_ratio,
+            resolution=resolution,
+            background=background,
+            output_format=output_format,
+            output_compression=output_compression,
+            seed=seed,
+            input_references=input_references,
+            extra=extra,
+        )
+        body["stream"] = True
+        async with self._http.astream_request("POST", "images", json=body) as response:
+            async for chunk in _aiter_image_sse(
+                response, http=self._http, generation_id=response.headers.get("X-Generation-Id")
+            ):
+                yield chunk
+
     def _body(
         self,
         model: str,
-        prompt: str,
+        prompt: str | None,
         *,
         n: int,
         size: str | None,
         quality: str | None,
+        aspect_ratio: str | None,
+        resolution: str | None,
+        background: str | None,
+        output_format: str | None,
+        output_compression: int | None,
+        seed: int | None,
         input_references: list[Any] | None,
         extra: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {"model": model, "prompt": prompt, "n": n}
+        if not prompt and not input_references:
+            raise ValueError("prompt is required unless input_references are provided")
+        body: dict[str, Any] = {"model": model, "n": n}
+        if prompt:
+            body["prompt"] = prompt
         if size:
             body["size"] = size
         if quality:
             body["quality"] = quality
+        if aspect_ratio:
+            body["aspect_ratio"] = aspect_ratio
+        if resolution:
+            body["resolution"] = resolution
+        if background:
+            body["background"] = background
+        if output_format:
+            body["output_format"] = output_format
+        if output_compression is not None:
+            body["output_compression"] = output_compression
+        if seed is not None:
+            body["seed"] = seed
         if input_references:
             body["input_references"] = input_references
-        merge_extra(extra, reserved=("model", "prompt", "n", "size", "quality", "input_references"))
+        merge_extra(
+            extra,
+            reserved=(
+                "model",
+                "prompt",
+                "n",
+                "size",
+                "quality",
+                "aspect_ratio",
+                "resolution",
+                "background",
+                "output_format",
+                "output_compression",
+                "seed",
+                "input_references",
+                "stream",
+            ),
+        )
         if extra:
             body.update(extra)
         return body
@@ -214,3 +356,75 @@ class Images:
         images = [self._parse_item(item) for item in payload.get("data") or []]
         usage = Usage.model_validate(payload["usage"]) if payload.get("usage") else None
         return ImageResult(images, usage, payload, response.generation_id)
+
+
+class ImageStreamChunk:
+    """A single SSE event of a streaming image generation."""
+
+    def __init__(self, raw: dict[str, Any], generation_id: str | None = None) -> None:
+        self.raw = raw
+        self.generation_id = generation_id
+
+    @property
+    def type(self) -> str | None:
+        return self.raw.get("type") if isinstance(self.raw, dict) else None
+
+    @property
+    def images(self) -> list[GeneratedImage]:
+        images = []
+        for item in self.raw.get("data") or []:
+            if not isinstance(item, dict):
+                continue
+            b64 = item.get("b64_json")
+            if b64:
+                images.append(GeneratedImage(base64.b64decode(b64), b64=b64))
+        return images
+
+    @property
+    def usage(self) -> Usage | None:
+        usage = self.raw.get("usage")
+        return Usage.model_validate(usage) if isinstance(usage, dict) else None
+
+    @property
+    def cost_rub(self) -> Decimal | None:
+        return self.usage.cost_rub if self.usage else None
+
+    @property
+    def is_completed(self) -> bool:
+        return self.type == "image_generation.completed"
+
+
+def _iter_image_sse(
+    response: Any, *, http: HTTPClient, generation_id: str | None = None
+) -> Iterator[ImageStreamChunk]:
+    import json
+
+    for line in response.iter_lines():
+        if not line or not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if data == "[DONE]":
+            break
+        try:
+            payload = json.loads(data)
+        except ValueError as exc:
+            raise RouterAIError(f"unparsable image SSE line: {data!r}") from exc
+        yield ImageStreamChunk(dict(payload), generation_id=generation_id)
+
+
+async def _aiter_image_sse(
+    response: Any, *, http: HTTPClient, generation_id: str | None = None
+) -> AsyncIterator[ImageStreamChunk]:
+    import json
+
+    async for line in response.aiter_lines():
+        if not line or not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if data == "[DONE]":
+            break
+        try:
+            payload = json.loads(data)
+        except ValueError as exc:
+            raise RouterAIError(f"unparsable image SSE line: {data!r}") from exc
+        yield ImageStreamChunk(dict(payload), generation_id=generation_id)

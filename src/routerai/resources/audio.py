@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import os
+from collections.abc import AsyncIterator, Iterator
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO
@@ -70,6 +71,36 @@ class Audio:
             "audio/speech", json=self._tts_body(model, input, voice, response_format, speed, extra)
         )
         return SpeechResult(response.content, response.generation_id)
+
+    def speech_stream(
+        self,
+        model: str,
+        input: str,
+        voice: str,
+        *,
+        response_format: str = "mp3",
+        speed: float | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> Iterator[bytes]:
+        """Synthesize speech as a byte stream instead of buffering it all."""
+        body = self._tts_body(model, input, voice, response_format, speed, extra)
+        with self._http.stream_request("POST", "audio/speech", json=body) as response:
+            yield from response.iter_bytes()
+
+    async def aspeech_stream(
+        self,
+        model: str,
+        input: str,
+        voice: str,
+        *,
+        response_format: str = "mp3",
+        speed: float | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> AsyncIterator[bytes]:
+        body = self._tts_body(model, input, voice, response_format, speed, extra)
+        async with self._http.astream_request("POST", "audio/speech", json=body) as response:
+            async for chunk in response.aiter_bytes():
+                yield chunk
 
     def _tts_body(
         self,

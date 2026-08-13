@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 from collections.abc import AsyncIterator, Iterator, Sequence
 from decimal import Decimal
@@ -313,6 +315,23 @@ class StreamChunk:
         return None
 
     @property
+    def audio(self) -> AudioDelta | None:
+        """Decoded audio delta (chat audio output models)."""
+        for choice in self.raw.get("choices") or []:
+            delta = choice.get("delta") or {}
+            audio = delta.get("audio")
+            if isinstance(audio, dict) and audio.get("data"):
+                try:
+                    return AudioDelta(
+                        data=base64.b64decode(audio["data"], validate=True),
+                        format=audio.get("format"),
+                        transcript=audio.get("transcript"),
+                    )
+                except (binascii.Error, ValueError):
+                    continue
+        return None
+
+    @property
     def usage(self) -> Usage | None:
         usage = self.raw.get("usage")
         return Usage.model_validate(usage) if usage else None
@@ -321,6 +340,92 @@ class StreamChunk:
     def cost_rub(self) -> Decimal | None:
         usage = self.usage
         return usage.cost_rub if usage else None
+
+
+class AudioDelta:
+    """A decoded audio chunk from a chat audio stream."""
+
+    def __init__(
+        self, data: bytes, *, format: str | None = None, transcript: str | None = None
+    ) -> None:
+        self.data = data
+        self.format = format
+        self.transcript = transcript
+
+
+class StreamAccumulator:
+    """Aggregates streamed chunks into a single result.
+
+    Collects text, reasoning, tool calls and audio deltas across SSE chunks
+    and keeps the final usage/metadata reported by the last chunk.
+    """
+
+    def __init__(self) -> None:
+        self.generation_id: str | None = None
+        self._content: list[str] = []
+        self._reasoning: list[str] = []
+        self._tool_calls: list[dict[str, Any]] = []
+        self._audio: list[AudioDelta] = []
+        self._usage: Usage | None = None
+        self._finish_reason: str | None = None
+        self.chunks_received = 0
+
+    def add(self, chunk: StreamChunk) -> None:
+        self.chunks_received += 1
+        if chunk.generation_id and not self.generation_id:
+            self.generation_id = chunk.generation_id
+        if chunk.content:
+            self._content.append(chunk.content)
+        if chunk.reasoning:
+            self._reasoning.append(chunk.reasoning)
+        if chunk.tool_calls:
+            self._tool_calls.extend(chunk.tool_calls)
+        if chunk.audio is not None:
+            self._audio.append(chunk.audio)
+        if chunk.usage is not None:
+            self._usage = chunk.usage
+        if chunk.finish_reason:
+            self._finish_reason = chunk.finish_reason
+
+    @property
+    def content(self) -> str:
+        return "".join(self._content)
+
+    @property
+    def reasoning(self) -> str:
+        return "".join(self._reasoning)
+
+    @property
+    def tool_calls(self) -> list[dict[str, Any]]:
+        return list(self._tool_calls)
+
+    @property
+    def audio(self) -> list[AudioDelta]:
+        return list(self._audio)
+
+    @property
+    def usage(self) -> Usage | None:
+        return self._usage
+
+    @property
+    def finish_reason(self) -> str | None:
+        return self._finish_reason
+
+    @property
+    def cost_rub(self) -> Decimal | None:
+        return self._usage.cost_rub if self._usage else None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "generation_id": self.generation_id,
+            "content": self.content,
+            "reasoning": self.reasoning,
+            "tool_calls": self.tool_calls,
+            "audio_chunks": len(self._audio),
+            "usage": self._usage.model_dump() if self._usage else None,
+            "finish_reason": self._finish_reason,
+            "chunks_received": self.chunks_received,
+        }
 
 
 def _parse_sse_event(data: str, chunks_received: int) -> dict[str, Any] | None:

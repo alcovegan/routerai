@@ -13,8 +13,10 @@ from .errors import (
     RouterAIError,
     StreamInterruptedError,
     VideoGenerationError,
+    WebhookVerificationError,
 )
 from .registry import Registry
+from .resources.chat import AudioDelta, StreamAccumulator
 from .resources.videos import FrameImage, ImageReference
 from .schemas import (
     Architecture,
@@ -41,6 +43,7 @@ __version__ = "0.1.0"
 __all__ = [
     "APIStatusError",
     "Architecture",
+    "AudioDelta",
     "AuthenticationError",
     "Capability",
     "ChatResult",
@@ -67,11 +70,13 @@ __all__ = [
     "RouterAI",
     "RouterAIError",
     "ServiceTier",
+    "StreamAccumulator",
     "StreamInterruptedError",
     "TeamInvitation",
     "TeamMember",
     "ToolCall",
     "Usage",
     "VideoGenerationError",
+    "WebhookVerificationError",
     "__version__",
 ]
