@@ -16,6 +16,14 @@ from .chat import (
     ServiceTier,
     ToolCall,
 )
+from .management import (
+    KeyInfo,
+    MemberCreation,
+    MessagesResult,
+    ResponsesResult,
+    TeamInvitation,
+    TeamMember,
+)
 from .usage import GenerationInfo, Usage
 
 __all__ = [
@@ -27,12 +35,18 @@ __all__ = [
     "Endpoint",
     "EndpointPricing",
     "GenerationInfo",
+    "KeyInfo",
+    "MemberCreation",
     "Message",
+    "MessagesResult",
     "Model",
     "ModelDetail",
     "ModelPricing",
     "ProviderSelection",
+    "ResponsesResult",
     "ServiceTier",
+    "TeamInvitation",
+    "TeamMember",
     "ToolCall",
     "Usage",
 ]

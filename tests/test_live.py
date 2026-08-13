@@ -297,19 +297,12 @@ def test_responses_api(live_client, spend):
         live_client, "responses", [CHEAP_CHAT, REASONING_MODEL, "openai/gpt-5.6-mini"]
     )
     print(f"  [responses model: {model}]")
-    payload = live_client.responses.create(model, "Ответь одним словом: столица Японии?")
-    assert payload.get("id")
-    assert payload.get("status") == "completed"
-    output_text = ""
-    for item in payload.get("output") or []:
-        for part in item.get("content") or []:
-            if part.get("type") == "output_text":
-                output_text += part.get("text", "")
-    assert "Токио" in output_text
-    usage = payload.get("usage") or {}
-    assert usage.get("total_tokens") or usage.get("input_tokens")
-    cost = Decimal(str(usage["cost"])) if usage.get("cost") is not None else None
-    track(spend, cost, required=False)
+    result = live_client.responses.create(model, "Ответь одним словом: столица Японии?")
+    assert result.id
+    assert result.status == "completed"
+    assert "Токио" in result.output_text
+    assert result.usage and (result.usage.total_tokens or result.usage.input_tokens)
+    track(spend, result.cost_rub, required=False)
 
 
 def test_messages_api(live_client, spend):
@@ -317,17 +310,15 @@ def test_messages_api(live_client, spend):
         live_client, "messages", ["anthropic/claude-sonnet-4.5", REASONING_MODEL]
     )
     print(f"  [messages model: {model}]")
-    payload = live_client.messages.create(
+    result = live_client.messages.create(
         model,
         [{"role": "user", "content": "Ответь одним словом: столица Германии?"}],
         max_tokens=64,
     )
-    assert payload.get("id")
-    assert payload.get("content")
-    usage = payload.get("usage") or {}
-    assert usage.get("input_tokens")
-    cost = Decimal(str(usage["cost"])) if usage.get("cost") is not None else None
-    track(spend, cost, required=False)
+    assert result.id
+    assert result.content
+    assert result.usage and result.usage.input_tokens
+    track(spend, result.cost_rub, required=False)
 
 
 # --- 15. audio ---

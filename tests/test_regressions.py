@@ -1185,3 +1185,81 @@ def test_network_guard_blocks_real_sockets():
     with pytest.raises(Exception) as exc_info:
         socket.create_connection(("routerai.ru", 443), timeout=0.1)
     assert "socket" in type(exc_info.value).__name__.lower()
+
+
+# --- audit 4 wave: typed management and protocol results ---
+
+
+def test_responses_result_typed(respx_mock):
+    payload = {
+        "id": "resp-1",
+        "object": "response",
+        "status": "completed",
+        "model": "m",
+        "output": [
+            {
+                "id": "msg_1",
+                "type": "message",
+                "content": [{"type": "output_text", "text": "Токио"}],
+            }
+        ],
+        "usage": {"total_tokens": 10, "cost": 0.01},
+    }
+    respx_mock.post("https://routerai.ru/api/v1/responses").mock(
+        return_value=httpx_response(payload)
+    )
+    client = RouterAI(api_key="sk-test")
+    result = client.responses.create("m", "x")
+    assert result.id == "resp-1"
+    assert result.output_text == "Токио"
+    assert result.cost_rub == Decimal("0.01")
+    assert result.raw == payload
+    client.close()
+
+
+def test_messages_result_typed(respx_mock):
+    payload = {
+        "id": "msg_1",
+        "type": "message",
+        "role": "assistant",
+        "model": "m",
+        "content": [{"type": "text", "text": "Берлин"}, {"type": "thinking", "thinking": "..."}],
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 12, "output_tokens": 4},
+    }
+    respx_mock.post("https://routerai.ru/api/v1/messages").mock(
+        return_value=httpx_response(payload)
+    )
+    client = RouterAI(api_key="sk-test")
+    result = client.messages.create("m", [{"role": "user", "content": "x"}])
+    assert result.id == "msg_1"
+    assert result.text == "Берлин"
+    assert result.stop_reason == "end_turn"
+    assert result.usage and result.usage.input_tokens == 12
+    client.close()
+
+
+def test_generation_get_returns_typed_info(respx_mock):
+    respx_mock.get("https://routerai.ru/api/v1/generation?id=g1").mock(
+        return_value=httpx_response({"data": {"id": "g1", "total_cost": 3.14}})
+    )
+    client = RouterAI(api_key="sk-test")
+    info = client.generation.get("g1")
+    assert info.id == "g1"
+    assert info.total_cost == Decimal("3.14")
+    client.close()
+
+
+def test_management_types_exported():
+    import routerai
+
+    for name in (
+        "KeyInfo",
+        "TeamMember",
+        "TeamInvitation",
+        "MemberCreation",
+        "ResponsesResult",
+        "MessagesResult",
+    ):
+        assert name in routerai.__all__
+        assert hasattr(routerai, name)

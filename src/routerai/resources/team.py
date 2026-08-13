@@ -3,6 +3,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from .._extras import merge_extra
+from ..schemas import MemberCreation, TeamInvitation, TeamMember
+
+TeamMemberList = list[TeamMember]
 
 if TYPE_CHECKING:
     from .._http import HTTPClient
@@ -14,11 +17,13 @@ class Team:
     def __init__(self, http: HTTPClient) -> None:
         self._http = http
 
-    def members(self) -> dict[str, Any]:
-        return self._http._json(self._http.get("team/members"))
+    def members(self) -> TeamMemberList:
+        payload = self._http._json(self._http.get("team/members"))
+        return [TeamMember.model_validate(item) for item in payload.get("data") or []]
 
-    async def amembers(self) -> dict[str, Any]:
-        return self._http._json(await self._http.aget("team/members"))
+    async def amembers(self) -> TeamMemberList:
+        payload = self._http._json(await self._http.aget("team/members"))
+        return [TeamMember.model_validate(item) for item in payload.get("data") or []]
 
     def create_member(
         self,
@@ -30,7 +35,7 @@ class Team:
         send_email: bool = False,
         password: str | None = None,
         extra: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
+    ) -> MemberCreation:
         body: dict[str, Any] = {"email": email, "role": role, "send_email": send_email}
         if monthly_spending_limit is not None:
             body["monthly_spending_limit"] = monthly_spending_limit
@@ -51,7 +56,14 @@ class Team:
         )
         if extra:
             body.update(extra)
-        return self._http._json(self._http.post("team/members", json=body))
+        payload = self._http._json(self._http.post("team/members", json=body))
+        return MemberCreation(
+            data=TeamMember.model_validate(payload["data"])
+            if isinstance(payload.get("data"), dict)
+            else None,
+            password_setup_url=payload.get("password_setup_url"),
+            raw=payload,
+        )
 
     async def acreate_member(
         self,
@@ -63,7 +75,7 @@ class Team:
         send_email: bool = False,
         password: str | None = None,
         extra: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
+    ) -> MemberCreation:
         body: dict[str, Any] = {"email": email, "role": role, "send_email": send_email}
         if monthly_spending_limit is not None:
             body["monthly_spending_limit"] = monthly_spending_limit
@@ -84,17 +96,26 @@ class Team:
         )
         if extra:
             body.update(extra)
-        return self._http._json(await self._http.apost("team/members", json=body))
+        payload = self._http._json(await self._http.apost("team/members", json=body))
+        return MemberCreation(
+            data=TeamMember.model_validate(payload["data"])
+            if isinstance(payload.get("data"), dict)
+            else None,
+            password_setup_url=payload.get("password_setup_url"),
+            raw=payload,
+        )
 
-    def update_member(self, member_id: int, **changes: Any) -> dict[str, Any]:
-        return self._http._json(
+    def update_member(self, member_id: int, **changes: Any) -> TeamMember:
+        payload = self._http._json(
             self._http.request("PATCH", f"team/members/{member_id}", json=changes)
         )
+        return TeamMember.model_validate(payload.get("data") or payload)
 
-    async def aupdate_member(self, member_id: int, **changes: Any) -> dict[str, Any]:
-        return self._http._json(
+    async def aupdate_member(self, member_id: int, **changes: Any) -> TeamMember:
+        payload = self._http._json(
             await self._http.arequest("PATCH", f"team/members/{member_id}", json=changes)
         )
+        return TeamMember.model_validate(payload.get("data") or payload)
 
     def delete_member(self, member_id: int) -> dict[str, Any]:
         return self._http._json(self._http.request("DELETE", f"team/members/{member_id}"))
@@ -109,12 +130,13 @@ class Team:
         role: str = "member",
         send_email: bool = False,
         extra: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
+    ) -> TeamInvitation:
         body: dict[str, Any] = {"email": email, "role": role, "send_email": send_email}
         merge_extra(extra, reserved=("email", "role", "send_email"))
         if extra:
             body.update(extra)
-        return self._http._json(self._http.post("team/invitations", json=body))
+        payload = self._http._json(self._http.post("team/invitations", json=body))
+        return TeamInvitation.model_validate({**(payload.get("data") or payload), "raw": payload})
 
     async def ainvite(
         self,
@@ -123,9 +145,10 @@ class Team:
         role: str = "member",
         send_email: bool = False,
         extra: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
+    ) -> TeamInvitation:
         body: dict[str, Any] = {"email": email, "role": role, "send_email": send_email}
         merge_extra(extra, reserved=("email", "role", "send_email"))
         if extra:
             body.update(extra)
-        return self._http._json(await self._http.apost("team/invitations", json=body))
+        payload = self._http._json(await self._http.apost("team/invitations", json=body))
+        return TeamInvitation.model_validate({**(payload.get("data") or payload), "raw": payload})

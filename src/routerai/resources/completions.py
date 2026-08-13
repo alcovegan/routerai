@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, ConfigDict
 
 from .._extras import merge_extra
-from ..schemas import Usage
+from ..schemas import MessagesResult, ResponsesResult, Usage
 
 if TYPE_CHECKING:
     from .._http import HTTPClient
@@ -106,13 +106,16 @@ class Responses:
     def __init__(self, http: HTTPClient) -> None:
         self._http = http
 
-    def create(self, model: str, input: Any, **kwargs: Any) -> dict[str, Any]:
+    def create(self, model: str, input: Any, **kwargs: Any) -> ResponsesResult:
         body = {"model": model, "input": input, **kwargs}
-        return self._http._json(self._http.post("responses", json=body))
+        return ResponsesResult.from_payload(
+            self._http._json(self._http.post("responses", json=body))
+        )
 
-    async def acreate(self, model: str, input: Any, **kwargs: Any) -> dict[str, Any]:
+    async def acreate(self, model: str, input: Any, **kwargs: Any) -> ResponsesResult:
         body = {"model": model, "input": input, **kwargs}
-        return self._http._json(await self._http.apost("responses", json=body))
+        payload = self._http._json(await self._http.apost("responses", json=body))
+        return ResponsesResult.from_payload(payload)
 
 
 class Messages:
@@ -121,12 +124,13 @@ class Messages:
     def __init__(self, http: HTTPClient) -> None:
         self._http = http
 
-    def create(self, model: str, messages: list[dict[str, Any]], **kwargs: Any) -> dict[str, Any]:
+    def create(self, model: str, messages: list[dict[str, Any]], **kwargs: Any) -> MessagesResult:
         body = {"model": model, "messages": messages, **kwargs}
-        return self._http._json(self._http.post("messages", json=body))
+        return MessagesResult.from_payload(self._http._json(self._http.post("messages", json=body)))
 
     async def acreate(
         self, model: str, messages: list[dict[str, Any]], **kwargs: Any
-    ) -> dict[str, Any]:
+    ) -> MessagesResult:
         body = {"model": model, "messages": messages, **kwargs}
-        return self._http._json(await self._http.apost("messages", json=body))
+        payload = self._http._json(await self._http.apost("messages", json=body))
+        return MessagesResult.from_payload(payload)

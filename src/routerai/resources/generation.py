@@ -3,6 +3,8 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+from ..schemas import GenerationInfo
+
 if TYPE_CHECKING:
     from .._http import HTTPClient
 
@@ -18,34 +20,25 @@ class Generation:
     def __init__(self, http: HTTPClient) -> None:
         self._http = http
 
-    def get(self, generation_id: str) -> dict[str, Any]:
+    def get(self, generation_id: str) -> GenerationInfo:
         response = self._http.get("generation", params={"id": generation_id})
-        return self._http._json(response)
+        payload = self._http._json(response)
+        return GenerationInfo.model_validate(_unwrap(payload))
 
-    async def aget(self, generation_id: str) -> dict[str, Any]:
+    async def aget(self, generation_id: str) -> GenerationInfo:
         response = await self._http.aget("generation", params={"id": generation_id})
-        return self._http._json(response)
+        payload = self._http._json(response)
+        return GenerationInfo.model_validate(_unwrap(payload))
 
     def cost(self, generation_id: str) -> Decimal | None:
-        payload = self.get(generation_id)
-        return self._extract_cost(payload)
+        return self.get(generation_id).total_cost
 
     async def acost(self, generation_id: str) -> Decimal | None:
-        payload = await self.aget(generation_id)
-        return self._extract_cost(payload)
+        return (await self.aget(generation_id)).total_cost
 
-    def _extract_cost(self, payload: dict[str, Any]) -> Decimal | None:
-        for key in ("total_cost", "cost"):
-            value = payload.get(key)
-            if value is not None:
-                return Decimal(str(value))
-        data = payload.get("data")
-        if isinstance(data, dict):
-            for key in ("total_cost", "cost"):
-                value = data.get(key)
-                if value is not None:
-                    return Decimal(str(value))
-        usage = payload.get("usage")
-        if isinstance(usage, dict) and usage.get("cost") is not None:
-            return Decimal(str(usage["cost"]))
-        return None
+
+def _unwrap(payload: dict[str, Any]) -> dict[str, Any]:
+    data = payload.get("data")
+    if isinstance(data, dict):
+        return {**payload, **data}
+    return payload

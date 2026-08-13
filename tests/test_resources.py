@@ -156,12 +156,20 @@ def test_keys_and_team(respx_mock):
         return_value=httpx_response({"data": {"id": "k2", "key": "sk-new"}})
     )
     respx_mock.post("https://routerai.ru/api/v1/team/members").mock(
-        return_value=httpx_response({"data": {"id": 42}})
+        return_value=httpx_response({"data": {"id": 42, "email": "user@example.com"}})
+    )
+    respx_mock.post("https://routerai.ru/api/v1/team/invitations").mock(
+        return_value=httpx_response(
+            {"data": {"id": 7, "email": "inv@example.com", "invite_url": "https://x/i"}}
+        )
     )
     client = RouterAI(api_key="sk-master")
-    assert client.keys.list()["data"][0]["id"] == "k1"
-    assert client.keys.create("dev")["data"]["key"] == "sk-new"
-    assert client.team.create_member("user@example.com")["data"]["id"] == 42
+    assert client.keys.list()[0].id == "k1"
+    assert client.keys.create("dev").key == "sk-new"
+    member = client.team.create_member("user@example.com")
+    assert member.data is not None and member.data.id == 42
+    invite = client.team.invite("inv@example.com")
+    assert invite.id == 7 and invite.invite_url == "https://x/i"
     client.close()
 
 

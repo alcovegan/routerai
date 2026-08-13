@@ -3,6 +3,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from .._extras import merge_extra
+from ..schemas import KeyInfo
+
+KeyInfoList = list[KeyInfo]
 
 if TYPE_CHECKING:
     from .._http import HTTPClient
@@ -17,11 +20,13 @@ class Keys:
     def __init__(self, http: HTTPClient) -> None:
         self._http = http
 
-    def list(self) -> dict[str, Any]:
-        return self._http._json(self._http.get("keys"))
+    def list(self) -> KeyInfoList:
+        payload = self._http._json(self._http.get("keys"))
+        return [KeyInfo.model_validate(item) for item in payload.get("data") or []]
 
-    async def alist(self) -> dict[str, Any]:
-        return self._http._json(await self._http.aget("keys"))
+    async def alist(self) -> KeyInfoList:
+        payload = self._http._json(await self._http.aget("keys"))
+        return [KeyInfo.model_validate(item) for item in payload.get("data") or []]
 
     def create(
         self,
@@ -30,7 +35,7 @@ class Keys:
         limit: float | None = None,
         expires_at: str | None = None,
         extra: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
+    ) -> KeyInfo:
         body: dict[str, Any] = {"name": name}
         if limit is not None:
             body["limit"] = limit
@@ -39,7 +44,8 @@ class Keys:
         merge_extra(extra, reserved=("name", "limit", "expires_at"))
         if extra:
             body.update(extra)
-        return self._http._json(self._http.post("keys", json=body))
+        payload = self._http._json(self._http.post("keys", json=body))
+        return KeyInfo.model_validate(payload.get("data") or payload)
 
     async def acreate(
         self,
@@ -48,7 +54,7 @@ class Keys:
         limit: float | None = None,
         expires_at: str | None = None,
         extra: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
+    ) -> KeyInfo:
         body: dict[str, Any] = {"name": name}
         if limit is not None:
             body["limit"] = limit
@@ -57,7 +63,8 @@ class Keys:
         merge_extra(extra, reserved=("name", "limit", "expires_at"))
         if extra:
             body.update(extra)
-        return self._http._json(await self._http.apost("keys", json=body))
+        payload = self._http._json(await self._http.apost("keys", json=body))
+        return KeyInfo.model_validate(payload.get("data") or payload)
 
     def delete(self, key_id: str) -> dict[str, Any]:
         return self._http._json(self._http.request("DELETE", f"keys/{key_id}"))
