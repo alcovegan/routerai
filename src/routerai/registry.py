@@ -26,11 +26,11 @@ class Registry:
     def __init__(self, **clients: RouterAI) -> None:
         self._clients: dict[str, RouterAI] = dict(clients)
         self._default: str | None = next(iter(self._clients), None)
-        self._active: ContextVar[RouterAI | None] = ContextVar(
+        self._active: ContextVar[str | None] = ContextVar(
             f"routerai_registry_{id(self)}", default=None
         )
         if self._default is not None:
-            self._active.set(self._clients[self._default])
+            self._active.set(self._default)
 
     def __getitem__(self, name: str) -> RouterAI:
         return self._clients[name]
@@ -49,21 +49,27 @@ class Registry:
         self._clients[name] = client
         if make_default or self._default is None:
             self._default = name
-            self._active.set(client)
+            self._active.set(name)
 
     def remove(self, name: str) -> None:
-        client = self._clients.pop(name)
-        if self._active.get() is client:
-            fallback = next(iter(self._clients.values()), None)
-            self._active.set(fallback)
+        self._clients.pop(name)
+        if self._active.get() == name:
+            self._active.set(self._default)
         if self._default == name:
             self._default = next(iter(self._clients), None)
 
     def current(self) -> RouterAI | None:
-        """Client set by the last ``using`` context in this registry."""
-        active = self._active.get()
-        if active is not None:
-            return active
+        """Client set by the last ``using`` context in this registry.
+
+        The active value is stored as a name and resolved against the
+        current set of clients, so removed clients never leak back from a
+        stale context token.
+        """
+        name = self._active.get()
+        if name is not None:
+            client = self._clients.get(name)
+            if client is not None:
+                return client
         if self._default is not None:
             return self._clients[self._default]
         return None
@@ -74,7 +80,7 @@ class Registry:
     @contextmanager
     def using(self, name: str) -> Iterator[RouterAI]:
         client = self._clients[name]
-        token = self._active.set(client)
+        token = self._active.set(name)
         try:
             yield client
         finally:
