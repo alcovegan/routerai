@@ -1,5 +1,7 @@
 # routerai
 
+[Русская версия](README.ru.md)
+
 Python wrapper for the [RouterAI](https://routerai.ru) API — unified access to 450+ AI models
 (OpenAI, Anthropic, Google, DeepSeek, Qwen, ...) with ruble pricing.
 
