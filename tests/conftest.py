@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import httpx
 import pytest
 
@@ -72,3 +74,23 @@ def catalog_route(respx_mock):
     return respx_mock.get("https://routerai.ru/api/v1/models").mock(
         return_value=httpx_response({"data": CATALOG})
     )
+
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--run-live",
+        action="store_true",
+        default=False,
+        help="run live tests against the real RouterAI API",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    """Keep the default suite hermetic: live tests need an explicit opt-in."""
+    run_live = config.getoption("--run-live") or os.getenv("ROUTERAI_RUN_LIVE") == "1"
+    if run_live:
+        return
+    skip = pytest.mark.skip(reason="live tests require --run-live or ROUTERAI_RUN_LIVE=1")
+    for item in items:
+        if "live" in item.keywords:
+            item.add_marker(skip)

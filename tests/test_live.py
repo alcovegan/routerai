@@ -1,13 +1,13 @@
 """Live integration matrix against the real RouterAI API.
 
-These tests are skipped unless the ``ROUTERAI_API_KEY`` env var is set. They
-spend real rubles (the full matrix costs ~18 ₽) and verify end-to-end
-behavior: request contracts, response parsing, cost accounting and errors.
+These tests spend real rubles and never run in the default suite: they are
+gated by ``pytest.mark.live`` plus an explicit opt-in (``--run-live`` flag or
+``ROUTERAI_RUN_LIVE=1`` env var) and skip unless ``ROUTERAI_API_KEY`` is set.
 
 Run:
-    ROUTERAI_API_KEY=sk-... uv run pytest tests/test_live.py -v -s
+    ROUTERAI_API_KEY=sk-... uv run pytest tests/test_live.py --run-live -v -s
 Skip the most expensive test:
-    ROUTERAI_API_KEY=sk-... uv run pytest tests/test_live.py -v -s -k "not video"
+    ROUTERAI_API_KEY=sk-... uv run pytest tests/test_live.py --run-live -v -s -k "not video"
 """
 
 from __future__ import annotations

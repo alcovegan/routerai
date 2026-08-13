@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from decimal import Decimal
 
 import httpx
@@ -13,6 +14,8 @@ from routerai import Registry, RouterAI
 from routerai.errors import (
     APIStatusError,
     AuthenticationError,
+    ConfigurationError,
+    RouterAIError,
     StreamInterruptedError,
 )
 
@@ -524,4 +527,310 @@ def test_transcribe_explicit_format_overrides_suffix(respx_mock, tmp_path):
     client.audio.transcribe("openai/whisper-large-v3", audio, format="flac")
     body = json.loads(respx_mock.calls.last.request.content)
     assert body["input_audio"]["format"] == "flac"
+    client.close()
+
+
+# --- audit 3: STREAM-02 async streaming error body on unread async stream ---
+
+
+async def test_async_streaming_401_unread_body(respx_mock):
+    class ErrorAsyncStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'{"error": {"message": "bad key"}}'
+
+    respx_mock.post("https://routerai.ru/api/v1/chat/completions").mock(
+        return_value=httpx.Response(401, stream=ErrorAsyncStream())
+    )
+    client = RouterAI(api_key="sk-test", max_retries=0)
+    with pytest.raises(AuthenticationError):
+        async for _ in client.chat.astream("m", "x"):
+            pass
+    assert respx_mock.calls.call_count == 1
+    await client.aclose()
+
+
+async def test_async_streaming_500_unread_body(respx_mock):
+    class ErrorAsyncStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'{"error": {"code": "x", "message": "boom"}}'
+
+    respx_mock.post("https://routerai.ru/api/v1/chat/completions").mock(
+        return_value=httpx.Response(500, stream=ErrorAsyncStream())
+    )
+    client = RouterAI(api_key="sk-test", max_retries=0)
+    with pytest.raises(APIStatusError) as exc_info:
+        async for _ in client.chat.astream("m", "x"):
+            pass
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.body == {"error": {"code": "x", "message": "boom"}}
+    await client.aclose()
+
+
+# --- audit 3: STREAM-03 extra cannot override stream invariant ---
+
+
+def test_stream_cannot_be_disabled_by_extra(respx_mock):
+    respx_mock.post("https://routerai.ru/api/v1/chat/completions").mock(
+        return_value=httpx_response("data: [DONE]")
+    )
+    client = RouterAI(api_key="sk-test")
+    with pytest.raises(ValueError, match="library-managed"):
+        list(client.chat.stream("m", "x", extra={"stream": False}))
+    assert respx_mock.calls.call_count == 0
+    client.close()
+
+
+def test_complete_cannot_be_turned_into_stream(respx_mock):
+    respx_mock.post("https://routerai.ru/api/v1/chat/completions").mock(
+        return_value=httpx_response(CHAT_OK)
+    )
+    client = RouterAI(api_key="sk-test")
+    with pytest.raises(ValueError, match="library-managed"):
+        client.chat.complete("m", "x", extra={"stream": True})
+    assert respx_mock.calls.call_count == 0
+    client.close()
+
+
+def test_stream_sets_stream_true_after_extra(respx_mock):
+    respx_mock.post("https://routerai.ru/api/v1/chat/completions").mock(
+        return_value=httpx_response("data: [DONE]")
+    )
+    client = RouterAI(api_key="sk-test")
+    list(client.chat.stream("m", "x", extra={"verbosity": "low"}))
+    body = json.loads(respx_mock.calls.last.request.content)
+    assert body["stream"] is True
+    assert body["verbosity"] == "low"
+    client.close()
+
+
+# --- audit 3: VIDEO-02 wire contract ---
+
+
+def test_video_frame_images_wire_contract(respx_mock):
+    from routerai.resources.videos import FrameImage, ImageReference
+
+    respx_mock.post("https://routerai.ru/api/v1/videos").mock(
+        return_value=httpx_response({"id": "v1", "status": "pending"})
+    )
+    client = RouterAI(api_key="sk-test")
+    client.videos.create(
+        "m", "prompt", frame_images=[FrameImage(url="https://x/f.png", frame_type="first_frame")]
+    )
+    body = json.loads(respx_mock.calls.last.request.content)
+    assert body["frame_images"] == [
+        {"type": "image_url", "image_url": {"url": "https://x/f.png"}, "frame_type": "first_frame"}
+    ]
+    assert "image_input" not in body
+
+    client.videos.create("m", "prompt", input_references=[ImageReference(url="https://x/r.png")])
+    body = json.loads(respx_mock.calls.last.request.content)
+    assert body["input_references"] == [
+        {"type": "image_url", "image_url": {"url": "https://x/r.png"}}
+    ]
+    client.close()
+
+
+def test_video_frame_images_and_references_conflict(respx_mock):
+    from routerai.resources.videos import FrameImage, ImageReference
+
+    client = RouterAI(api_key="sk-test")
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        client.videos.create(
+            "m",
+            "p",
+            frame_images=[FrameImage(url="https://x/f.png")],
+            input_references=[ImageReference(url="https://x/r.png")],
+        )
+    assert respx_mock.calls.call_count == 0
+    client.close()
+
+
+def test_video_image_input_deprecated_warns(respx_mock):
+    respx_mock.post("https://routerai.ru/api/v1/videos").mock(
+        return_value=httpx_response({"id": "v1", "status": "pending"})
+    )
+    client = RouterAI(api_key="sk-test")
+    with pytest.warns(DeprecationWarning, match="frame_images"):
+        client.videos.create("m", "p", image_input="https://x/f.png")
+    body = json.loads(respx_mock.calls.last.request.content)
+    assert body["frame_images"][0]["frame_type"] == "first_frame"
+    client.close()
+
+
+def test_video_wait_timeout_respected(respx_mock):
+    respx_mock.post("https://routerai.ru/api/v1/videos").mock(
+        return_value=httpx_response({"id": "v1", "status": "pending"})
+    )
+    respx_mock.get("https://routerai.ru/api/v1/videos/v1").mock(
+        return_value=httpx_response({"id": "v1", "status": "pending"})
+    )
+    client = RouterAI(api_key="sk-test")
+    task = client.videos.create("m", "p")
+    started = time.monotonic()
+    with pytest.raises(RouterAIError, match="not finished"):
+        task.wait(timeout=0.05, interval=0.1)
+    elapsed = time.monotonic() - started
+    assert elapsed < 0.3
+    client.close()
+
+
+def test_video_wait_validates_arguments(respx_mock):
+    respx_mock.post("https://routerai.ru/api/v1/videos").mock(
+        return_value=httpx_response({"id": "v1", "status": "pending"})
+    )
+    client = RouterAI(api_key="sk-test")
+    task = client.videos.create("m", "p")
+    with pytest.raises(ValueError, match="interval"):
+        task.wait(timeout=1, interval=0)
+    with pytest.raises(ValueError, match="timeout"):
+        task.wait(timeout=-1, interval=0.1)
+    client.close()
+
+
+# --- audit 3: STREAM-04 sse error envelope and generation id ---
+
+
+def test_sse_error_event_raises_typed_error(respx_mock):
+    respx_mock.post("https://routerai.ru/api/v1/chat/completions").mock(
+        return_value=httpx_response(
+            'data: {"choices":[{"delta":{"content":"частично"}}]}\n\ndata: {"error":{"message":"provider failed","status_code":502}}\n\n'.encode()
+        )
+    )
+    client = RouterAI(api_key="sk-test", max_retries=0)
+    chunks = []
+    with pytest.raises(APIStatusError, match="provider failed") as exc_info:
+        for chunk in client.chat.stream("m", "x"):
+            chunks.append(chunk)
+    assert len(chunks) == 1
+    assert exc_info.value.status_code == 502
+    client.close()
+
+
+def test_stream_chunks_carry_generation_id(respx_mock):
+    respx_mock.post("https://routerai.ru/api/v1/chat/completions").mock(
+        return_value=httpx_response(
+            b'data: {"choices":[{"delta":{"content":"a"}}]}\n\ndata: [DONE]\n',
+            headers={"X-Generation-Id": "gen-stream-1"},
+        )
+    )
+    client = RouterAI(api_key="sk-test")
+    chunks = list(client.chat.stream("m", "x"))
+    assert chunks[0].generation_id == "gen-stream-1"
+    client.close()
+
+
+# --- audit 3: DATA-02 lossless choices and legacy completions ---
+
+
+def test_chat_choice_unknown_fields_preserved(respx_mock):
+    payload = {
+        "id": "rai-x",
+        "model": "m",
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "stop",
+                "native_finish_reason": "stop",
+                "logprobs": {"content": []},
+                "message": {"role": "assistant", "content": "A"},
+            }
+        ],
+    }
+    respx_mock.post("https://routerai.ru/api/v1/chat/completions").mock(
+        return_value=httpx_response(payload)
+    )
+    client = RouterAI(api_key="sk-test")
+    result = client.chat.complete("m", "x")
+    extra = result.choices[0].model_extra or {}
+    assert extra["native_finish_reason"] == "stop"
+    assert extra["logprobs"] == {"content": []}
+    client.close()
+
+
+def test_legacy_completions_keep_alternatives(respx_mock):
+    payload = {
+        "id": "c1",
+        "choices": [
+            {"index": 0, "text": "A", "finish_reason": "stop"},
+            {"index": 1, "text": "B", "finish_reason": "stop"},
+        ],
+        "usage": {"total_tokens": 10, "cost": 0.01},
+    }
+    respx_mock.post("https://routerai.ru/api/v1/completions").mock(
+        return_value=httpx_response(payload, headers={"X-Generation-Id": "gen-c1"})
+    )
+    client = RouterAI(api_key="sk-test")
+    result = client.completions.create("m", "p")
+    assert result.text == "A"
+    assert [c.text for c in result.choices] == ["A", "B"]
+    assert result.generation_id == "gen-c1"
+    assert result.cost_rub == Decimal("0.01")
+    client.close()
+
+
+# --- audit 3: IMG-02 strict image parsing, no url auto-fetch ---
+
+
+def test_image_corrupt_base64_rejected(respx_mock):
+    respx_mock.post("https://routerai.ru/api/v1/images").mock(
+        return_value=httpx_response({"data": [{"b64_json": "%%%"}]})
+    )
+    client = RouterAI(api_key="sk-test")
+    with pytest.raises(RouterAIError, match="corrupted"):
+        client.images.generate("m", "p")
+    client.close()
+
+
+def test_image_empty_b64_rejected(respx_mock):
+    respx_mock.post("https://routerai.ru/api/v1/images").mock(
+        return_value=httpx_response({"data": [{"b64_json": ""}]})
+    )
+    client = RouterAI(api_key="sk-test")
+    with pytest.raises(RouterAIError, match="empty"):
+        client.images.generate("m", "p")
+    client.close()
+
+
+def test_image_url_kept_without_auto_fetch(respx_mock):
+    respx_mock.post("https://routerai.ru/api/v1/images").mock(
+        return_value=httpx_response({"data": [{"url": "https://x/i.png", "revised_prompt": "rp"}]})
+    )
+    client = RouterAI(api_key="sk-test")
+    result = client.images.generate("m", "p")
+    assert result.images[0].url == "https://x/i.png"
+    assert result.images[0].data is None
+    assert result.images[0].revised_prompt == "rp"
+    assert respx_mock.calls.call_count == 1  # no download attempt
+    client.close()
+
+
+# --- audit 3: CONFIG-02 numeric validation ---
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"timeout": 0}, "timeout"),
+        ({"timeout": -1}, "timeout"),
+        ({"timeout": float("nan")}, "timeout"),
+        ({"max_retries": -1}, "max_retries"),
+        ({"max_retries": 1.5}, "max_retries"),
+        ({"retry_backoff": -0.1}, "retry_backoff"),
+        ({"retry_backoff": float("inf")}, "retry_backoff"),
+    ],
+)
+def test_config_validation(kwargs, match):
+    with pytest.raises(ConfigurationError, match=match):
+        RouterAI(api_key="sk-test", **kwargs)
+
+
+# --- audit 3: TYPES-02 list methods are real ---
+
+
+def test_models_list_methods_exist(catalog_route):
+    from routerai.resources.models import Models
+
+    assert isinstance(Models.list, type(Models.all))
+    client = RouterAI(api_key="sk-test")
+    assert len(client.models.list()) == 3
     client.close()
