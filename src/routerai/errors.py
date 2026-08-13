@@ -76,5 +76,17 @@ class WebhookVerificationError(RouterAIError):
     """Raised when a video webhook fails signature or freshness checks."""
 
 
+class DeadlineExceededError(RouterAIError):
+    """Raised when an absolute operation deadline passes before completion.
+
+    Carries the remaining budget information and is raised instead of
+    starting a new attempt or sleeping past the caller's deadline.
+    """
+
+    def __init__(self, message: str, *, budget: float | None = None) -> None:
+        super().__init__(message)
+        self.budget = budget
+
+
 class ModelNotFoundError(RouterAIError):
     """Raised when a model is not found in the catalog."""
