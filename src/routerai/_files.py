@@ -32,6 +32,8 @@ class AtomicFileWriter:
     """
 
     def __init__(self, target: str | Path, *, max_bytes: int) -> None:
+        if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes <= 0:
+            raise ValueError(f"max_bytes must be a positive integer, got {max_bytes!r}")
         self.target = Path(target)
         self.max_bytes = max_bytes
         self._tmp: Path | None = None
@@ -61,13 +63,15 @@ class AtomicFileWriter:
     def tmp_path(self) -> Path | None:
         return self._tmp
 
-    def _cleanup(self) -> None:
+    def abort(self) -> None:
+        """Close the handle and remove the temporary file on a best-effort basis."""
         if self._handle is not None:
             with suppress(OSError):
                 self._handle.close()
             self._handle = None
         if self._tmp is not None:
-            self._tmp.unlink(missing_ok=True)
+            with suppress(OSError):
+                self._tmp.unlink(missing_ok=True)
             self._tmp = None
 
     def commit(self) -> Path:
@@ -81,4 +85,4 @@ class AtomicFileWriter:
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
         if exc_type is not None or self._handle is not None:
-            self._cleanup()
+            self.abort()

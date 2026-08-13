@@ -6,6 +6,23 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-08-14
+
+### Fixed
+
+- Propagated the video polling deadline through HTTP-status retries and
+  `Retry-After` backoff; async polling now cancels an in-flight refresh at the
+  wall-clock deadline.
+- Normalized image/video download transport failures into `RequestError` while
+  preserving the original `httpx` exception as `__cause__`.
+- Made atomic-download cleanup cancellation-safe and resistant to stale or
+  colliding temporary files.
+- Unified public HTTPS validation for video inputs, callbacks and image
+  downloads; private literal addresses, malformed ports, fragments and
+  credential-bearing URLs are rejected before network access.
+- Bounded image data-URI decoding before allocation and validated download
+  limits before opening a connection.
+
 ## [0.1.0] - 2026-08-13
 
 First public alpha (tag `v0.1.0-alpha.1`; the package version is `0.1.0`).

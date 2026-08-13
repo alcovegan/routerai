@@ -16,6 +16,7 @@ from routerai.errors import (
     AuthenticationError,
     ConfigurationError,
     DeadlineExceededError,
+    RequestError,
     RouterAIError,
     StreamInterruptedError,
     WebhookVerificationError,
@@ -1039,7 +1040,7 @@ def test_image_download_rejects_https_to_http_redirect(respx_mock, tmp_path):
     from routerai.resources.images import GeneratedImage
 
     image = GeneratedImage(url="https://provider.example/image")
-    with pytest.raises(RouterAIError, match="non-https"):
+    with pytest.raises(RouterAIError, match="https"):
         image.download(tmp_path / "i.png")
     assert not (tmp_path / "i.png").exists()
     assert respx_mock.calls.call_count == 1  # the http hop was never called
@@ -1497,8 +1498,9 @@ def test_image_download_cleans_temp_on_midstream_failure(respx_mock, tmp_path):
     from routerai.resources.images import GeneratedImage
 
     image = GeneratedImage(url="https://provider.example/image")
-    with pytest.raises(httpx.ReadError):
+    with pytest.raises(RequestError) as exc_info:
         image.download(tmp_path / "i.png")
+    assert isinstance(exc_info.value.__cause__, httpx.ReadError)
     assert not (tmp_path / "i.png").exists()
     assert not list(tmp_path.glob(".i.png.*"))
 
@@ -1537,10 +1539,43 @@ async def test_video_asave_cleans_temp_on_failure(respx_mock, tmp_path):
     respx_mock.get("https://routerai.ru/api/v1/videos/v1/content?index=0").mock(
         return_value=httpx.Response(200, stream=FailingAsyncStream())
     )
-    with pytest.raises(httpx.ReadError):
+    with pytest.raises(RequestError) as exc_info:
         await task.asave(str(tmp_path / "out.mp4"))
+    assert isinstance(exc_info.value.__cause__, httpx.ReadError)
     assert not (tmp_path / "out.mp4").exists()
     assert not list(tmp_path.glob(".out.mp4.*"))
+    await client.aclose()
+
+
+async def test_video_asave_cleans_temp_on_cancellation(respx_mock, tmp_path):
+    chunk_consumed = asyncio.Event()
+    keep_open = asyncio.Event()
+
+    class HangingAsyncStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"partial"
+            chunk_consumed.set()
+            await keep_open.wait()
+
+    respx_mock.post("https://routerai.ru/api/v1/videos").mock(
+        return_value=httpx_response({"id": "v1", "status": "pending"})
+    )
+    client = RouterAI(api_key="sk-test")
+    task = client.videos.create("m", "p")
+    task._apply({"id": "v1", "status": "completed", "unsigned_urls": ["https://x/0.mp4"]})
+    respx_mock.get("https://routerai.ru/api/v1/videos/v1/content?index=0").mock(
+        return_value=httpx.Response(200, stream=HangingAsyncStream())
+    )
+
+    target = tmp_path / "out.mp4"
+    save_task = asyncio.create_task(task.asave(str(target)))
+    await asyncio.wait_for(chunk_consumed.wait(), timeout=1)
+    save_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await save_task
+    assert not target.exists()
+    assert not list(tmp_path.glob(".out.mp4.*"))
+    client.close()
     await client.aclose()
 
 
@@ -1559,6 +1594,54 @@ def test_video_wait_deadline_bounds_retries(respx_mock):
     with pytest.raises(DeadlineExceededError):
         task.wait(timeout=0.05, interval=0.001)
     client.close()
+
+
+def test_video_wait_deadline_caps_status_retry_after(respx_mock):
+    """A retryable HTTP status must not sleep or retry past the task deadline."""
+    respx_mock.post("https://routerai.ru/api/v1/videos").mock(
+        return_value=httpx_response({"id": "v1", "status": "pending"})
+    )
+    route = respx_mock.get("https://routerai.ru/api/v1/videos/v1").mock(
+        return_value=httpx_response(
+            {"error": "temporary"}, status_code=503, headers={"Retry-After": "1"}
+        )
+    )
+    client = RouterAI(api_key="sk-test", max_retries=2, max_retry_after=0.2)
+    task = client.videos.create("m", "p")
+    started = time.monotonic()
+    with pytest.raises(DeadlineExceededError):
+        task.wait(timeout=0.03, interval=0.001)
+    elapsed = time.monotonic() - started
+    assert elapsed < 0.15
+    assert route.call_count == 1
+    client.close()
+
+
+async def test_video_await_deadline_cancels_inflight_refresh(respx_mock):
+    """The async deadline is a wall-clock cancel scope, not an inactivity timeout."""
+    respx_mock.post("https://routerai.ru/api/v1/videos").mock(
+        return_value=httpx_response({"id": "v1", "status": "pending"})
+    )
+
+    refresh_calls = 0
+
+    async def slow_refresh(request):
+        nonlocal refresh_calls
+        refresh_calls += 1
+        await asyncio.sleep(0.2)
+        return httpx_response({"id": "v1", "status": "pending"})
+
+    respx_mock.get("https://routerai.ru/api/v1/videos/v1").mock(side_effect=slow_refresh)
+    client = RouterAI(api_key="sk-test", max_retries=0)
+    task = client.videos.create("m", "p")
+    started = time.monotonic()
+    with pytest.raises(DeadlineExceededError):
+        await task.await_(timeout=0.03, interval=0.001)
+    elapsed = time.monotonic() - started
+    assert elapsed < 0.15
+    assert refresh_calls == 1
+    client.close()
+    await client.aclose()
 
 
 def test_retry_after_huge_integer_clamped(respx_mock):
@@ -1632,6 +1715,8 @@ def test_video_callback_url_validated(respx_mock):
         client.videos.create("m", "p", callback_url="http://example.com/hook")
     with pytest.raises(ValueError, match="callback_url"):
         client.videos.create("m", "p", callback_url="https://user:pass@example.com/hook")
+    with pytest.raises(ValueError, match="callback_url"):
+        client.videos.create("m", "p", callback_url="https://127.0.0.1/hook")
     assert respx_mock.calls.call_count == 0
     client.close()
 
@@ -1644,3 +1729,42 @@ def test_env_whitespace_values_rejected(monkeypatch):
     monkeypatch.setenv("ROUTERAI_BASE_URL", "   ")
     with pytest.raises(ConfigurationError, match="base_url"):
         RouterAI()
+
+
+def test_image_data_uri_has_a_predecode_size_limit():
+    from routerai._urls import validate_image_source
+
+    with pytest.raises(ValueError, match="byte limit"):
+        validate_image_source("data:image/png;base64,aGVsbG8=", max_data_bytes=4)
+
+
+def test_image_download_rejects_non_public_target_before_network(respx_mock, tmp_path):
+    from routerai.resources.images import GeneratedImage
+
+    image = GeneratedImage(url="https://127.0.0.1/image.png")
+    with pytest.raises(RouterAIError, match="not a public address"):
+        image.download(tmp_path / "i.png")
+    assert respx_mock.calls.call_count == 0
+
+
+def test_video_save_normalizes_transport_error(respx_mock, tmp_path):
+    class FailingStream(httpx.SyncByteStream):
+        def __iter__(self):
+            yield b"partial"
+            raise httpx.ReadError("connection lost")
+
+    respx_mock.post("https://routerai.ru/api/v1/videos").mock(
+        return_value=httpx_response({"id": "v1", "status": "pending"})
+    )
+    client = RouterAI(api_key="sk-test")
+    task = client.videos.create("m", "p")
+    task._apply({"id": "v1", "status": "completed", "unsigned_urls": ["https://x/0.mp4"]})
+    respx_mock.get("https://routerai.ru/api/v1/videos/v1/content?index=0").mock(
+        return_value=httpx.Response(200, stream=FailingStream())
+    )
+    with pytest.raises(RequestError) as exc_info:
+        task.save(str(tmp_path / "out.mp4"))
+    assert isinstance(exc_info.value.__cause__, httpx.ReadError)
+    assert not (tmp_path / "out.mp4").exists()
+    assert not list(tmp_path.glob(".out.mp4.*"))
+    client.close()

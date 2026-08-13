@@ -86,7 +86,7 @@ task = client.videos.create(
     frame_images=[FrameImage(url="https://example.com/first.png", frame_type="first_frame")],
     # or reference-to-video: input_references=[ImageReference(url=...)]
 )
-task.wait(timeout=600, interval=5)      # absolute deadline, incl. retries
+task.wait(timeout=600, interval=5)      # deadline includes sleeps and retries
 task.save("video.mp4", index=0)         # streaming download, atomic rename
 await task.asave("video.mp4")           # async variant, cancellation-safe
 
@@ -116,7 +116,7 @@ are never closed by the library.
 | --- | --- |
 | `api_key` / `ROUTERAI_API_KEY` | API key (env var used when argument is None) |
 | `base_url` / `ROUTERAI_BASE_URL` | base URL; precedence: explicit argument > env var > `https://routerai.ru/api/v1` |
-| `timeout` | per-request timeout in seconds (default 60) |
+| `timeout` | per-operation network inactivity timeout in seconds (default 60) |
 | `max_retries` | retry attempts with exponential backoff + jitter (default 2) |
 | `max_retry_after` | upper bound for an upstream `Retry-After` header, seconds (default 60) |
 | `retry_unsafe_methods` | retry POST/PATCH/DELETE on 5xx too (default False; RouterAI already
@@ -125,6 +125,13 @@ are never closed by the library.
 
 Retries honour the `Retry-After` header. Safe methods (GET/HEAD) are retried on
 429/5xx; unsafe methods only on 429 by default.
+
+Video polling propagates one deadline through sleeps, attempts and retry
+backoff. Async polling actively cancels an in-flight refresh at the deadline.
+For sync polling, HTTPX can only interrupt an in-flight socket operation using
+its connect/read/write/pool inactivity timeouts; if that operation returns just
+after the deadline, the SDK raises `DeadlineExceededError` before processing or
+retrying the response.
 
 The `extra` parameter is an escape hatch for provider-specific request fields:
 it can never override library-managed keys (`model`, `messages`, `stream`, ...)

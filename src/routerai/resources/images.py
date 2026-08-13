@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .._extras import merge_extra
-from ..errors import RouterAIError
+from ..errors import RequestError, RouterAIError
 from ..schemas import Usage
 
 if TYPE_CHECKING:
@@ -60,40 +60,55 @@ class GeneratedImage:
 
         if not self.url:
             raise RouterAIError("image has no url; use save() for inline data")
+        if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes <= 0:
+            raise ValueError(f"max_bytes must be a positive integer, got {max_bytes!r}")
+
+        if (
+            not isinstance(max_redirects, int)
+            or isinstance(max_redirects, bool)
+            or max_redirects < 0
+        ):
+            raise ValueError(f"max_redirects must be a non-negative integer, got {max_redirects!r}")
 
         url = self.url
-        with httpx.Client(timeout=timeout, follow_redirects=False) as client:
-            for _ in range(max_redirects + 1):
-                _validate_https_url(url)
-                with client.stream("GET", url) as response:
-                    if response.status_code in (301, 302, 303, 307, 308):
-                        location = response.headers.get("Location")
-                        if not location:
-                            raise RouterAIError(f"redirect from {url!r} without a Location header")
-                        url = urllib.parse.urljoin(url, location)
-                        continue
-                    response.raise_for_status()
-                    content_length = response.headers.get("content-length", "")
-                    if content_length.isdigit() and int(content_length) > max_bytes:
-                        raise RouterAIError(
-                            f"image exceeds the {max_bytes} byte download limit "
-                            f"(content-length={content_length})"
-                        )
-                    with AtomicFileWriter(path, max_bytes=max_bytes) as writer:
-                        for chunk in response.iter_bytes():
-                            writer.write(chunk)
-                        return writer.commit()
+        try:
+            with httpx.Client(timeout=timeout, follow_redirects=False) as client:
+                for _ in range(max_redirects + 1):
+                    _validate_https_url(url)
+                    with client.stream("GET", url) as response:
+                        if response.status_code in (301, 302, 303, 307, 308):
+                            location = response.headers.get("Location")
+                            if not location:
+                                raise RouterAIError(
+                                    f"redirect from {url!r} without a Location header"
+                                )
+                            url = urllib.parse.urljoin(url, location)
+                            continue
+                        response.raise_for_status()
+                        content_length = response.headers.get("content-length", "")
+                        if content_length.isdigit() and int(content_length) > max_bytes:
+                            raise RouterAIError(
+                                f"image exceeds the {max_bytes} byte download limit "
+                                f"(content-length={content_length})"
+                            )
+                        with AtomicFileWriter(path, max_bytes=max_bytes) as writer:
+                            for chunk in response.iter_bytes():
+                                writer.write(chunk)
+                            return writer.commit()
+        except httpx.HTTPStatusError as exc:
+            raise RouterAIError(f"image download returned HTTP {exc.response.status_code}") from exc
+        except httpx.RequestError as exc:
+            raise RequestError("image download failed") from exc
         raise RouterAIError(f"too many redirects while downloading {self.url!r}")
 
 
 def _validate_https_url(url: str) -> None:
-    import urllib.parse
+    from .._urls import validate_public_https_url
 
-    parsed = urllib.parse.urlsplit(url)
-    if parsed.scheme != "https":
-        raise RouterAIError(f"refusing to download non-https url: {url!r}")
-    if parsed.username or parsed.password:
-        raise RouterAIError("image urls with embedded credentials are not allowed")
+    try:
+        validate_public_https_url(url, field="image download url")
+    except ValueError as exc:
+        raise RouterAIError(str(exc)) from exc
 
 
 class ImageResult:

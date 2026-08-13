@@ -346,7 +346,9 @@ class HTTPClient:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise DeadlineExceededError("deadline exceeded during retry backoff")
-            delay = min(delay, remaining)
+            if delay >= remaining:
+                time.sleep(remaining)
+                raise DeadlineExceededError("deadline exceeded during retry backoff")
         time.sleep(delay)
 
     async def _await(
@@ -368,7 +370,9 @@ class HTTPClient:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise DeadlineExceededError("deadline exceeded during retry backoff")
-            delay = min(delay, remaining)
+            if delay >= remaining:
+                await asyncio.sleep(remaining)
+                raise DeadlineExceededError("deadline exceeded during retry backoff")
         await asyncio.sleep(delay)
 
     def _log_result(
@@ -451,6 +455,11 @@ class HTTPClient:
                     self._wait(attempt, deadline=deadline)
                     continue
                 break
+            if deadline is not None and time.monotonic() >= deadline:
+                response.close()
+                raise DeadlineExceededError(
+                    f"deadline exceeded while waiting for attempt {attempt + 1}"
+                )
             elapsed = time.monotonic() - started
             if (
                 self._should_retry_status(method, response.status_code)
@@ -465,7 +474,7 @@ class HTTPClient:
                     response.status_code,
                     attempt + 1,
                 )
-                self._wait(attempt, response)
+                self._wait(attempt, response, deadline=deadline)
                 continue
             envelope = ResponseEnvelope(response)
             self._log_result(envelope, method, url, elapsed)
@@ -587,7 +596,7 @@ class HTTPClient:
                 attempt_timeout = min(attempt_timeout, remaining)
             started = time.monotonic()
             try:
-                response = await client.request(
+                request = client.request(
                     method,
                     url,
                     params=params,
@@ -596,6 +605,17 @@ class HTTPClient:
                     headers=request_headers,
                     timeout=attempt_timeout,
                 )
+                if deadline is None:
+                    response = await request
+                else:
+                    import asyncio
+
+                    try:
+                        response = await asyncio.wait_for(request, timeout=remaining)
+                    except asyncio.TimeoutError as exc:
+                        raise DeadlineExceededError(
+                            f"deadline exceeded while waiting for attempt {attempt + 1}"
+                        ) from exc
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 last_exc = exc
                 if attempt < self._max_retries and self._should_retry_transport(method, exc):
@@ -605,6 +625,11 @@ class HTTPClient:
                     await self._await(attempt, deadline=deadline)
                     continue
                 break
+            if deadline is not None and time.monotonic() >= deadline:
+                await response.aclose()
+                raise DeadlineExceededError(
+                    f"deadline exceeded while waiting for attempt {attempt + 1}"
+                )
             elapsed = time.monotonic() - started
             if (
                 self._should_retry_status(method, response.status_code)
@@ -619,7 +644,7 @@ class HTTPClient:
                     response.status_code,
                     attempt + 1,
                 )
-                await self._await(attempt, response)
+                await self._await(attempt, response, deadline=deadline)
                 continue
             envelope = ResponseEnvelope(response)
             self._log_result(envelope, method, url, elapsed)
