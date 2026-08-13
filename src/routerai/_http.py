@@ -43,17 +43,6 @@ _STATUS_TO_ERROR: dict[int, type[RouterAIError]] = {
 }
 
 
-def _raise_for_status(status: int, message: str, body: Any = None) -> None:
-    if status < 400:
-        return
-    if status == 503 and "provider" in message.lower() and "available" in message.lower():
-        raise NoProviderError(message)
-    error_cls = _STATUS_TO_ERROR.get(status, APIStatusError)
-    if error_cls is APIStatusError:
-        raise APIStatusError(message, status, body)
-    raise error_cls(message)
-
-
 def _parse_error_payload(payload: Any) -> str:
     error = payload.get("error") if isinstance(payload, dict) else None
     if isinstance(error, dict) and error.get("message"):
@@ -63,20 +52,38 @@ def _parse_error_payload(payload: Any) -> str:
     return ""
 
 
-def _error_message(response: httpx.Response) -> str:
+def _response_body(response: httpx.Response) -> Any:
+    """Best-effort structured body for APIStatusError.body."""
     try:
-        body = response.text
+        text = response.text
     except httpx.ResponseNotRead:
-        body = response.read().decode("utf-8", errors="replace")
-    message = ""
+        text = response.read().decode("utf-8", errors="replace")
     try:
-        payload = json.loads(body)
-        message = _parse_error_payload(payload)
+        return json.loads(text)
     except ValueError:
+        return text
+
+
+def _error_message(response: httpx.Response) -> str:
+    body = _response_body(response)
+    message = _parse_error_payload(body)
+    if not message and isinstance(body, str):
         message = body.strip()
     if not message:
         message = f"HTTP {response.status_code}"
     return message
+
+
+def _raise_for_status(response: httpx.Response, message: str) -> None:
+    status = response.status_code
+    if status < 400:
+        return
+    if status == 503 and "provider" in message.lower() and "available" in message.lower():
+        raise NoProviderError(message)
+    error_cls = _STATUS_TO_ERROR.get(status, APIStatusError)
+    if error_cls is APIStatusError:
+        raise APIStatusError(message, status, _response_body(response))
+    raise error_cls(message)
 
 
 def _retry_after_seconds(response: httpx.Response) -> float | None:
@@ -291,7 +298,7 @@ class HTTPClient:
                 continue
             self._log_result(response, method, url, elapsed)
             _raise_for_status(
-                response.status_code,
+                response,
                 _error_message(response) if response.status_code >= 400 else "",
             )
             return response
@@ -355,7 +362,7 @@ class HTTPClient:
                         status=response.status_code,
                     )
                     _raise_for_status(
-                        response.status_code,
+                        response,
                         _error_message(response) if response.status_code >= 400 else "",
                     )
                     yielded = True
@@ -430,7 +437,7 @@ class HTTPClient:
                 continue
             self._log_result(response, method, url, elapsed)
             _raise_for_status(
-                response.status_code,
+                response,
                 _error_message(response) if response.status_code >= 400 else "",
             )
             return response
@@ -488,7 +495,7 @@ class HTTPClient:
                         status=response.status_code,
                     )
                     _raise_for_status(
-                        response.status_code,
+                        response,
                         _error_message(response) if response.status_code >= 400 else "",
                     )
                     yielded = True
