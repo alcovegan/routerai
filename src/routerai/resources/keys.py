@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from .._extras import merge_extra
+
 if TYPE_CHECKING:
     from .._http import HTTPClient
 
@@ -34,6 +36,7 @@ class Keys:
             body["limit"] = limit
         if expires_at:
             body["expires_at"] = expires_at
+        merge_extra(extra, reserved=("name", "limit", "expires_at"))
         if extra:
             body.update(extra)
         return self._http._json(self._http.post("keys", json=body))
@@ -51,6 +54,7 @@ class Keys:
             body["limit"] = limit
         if expires_at:
             body["expires_at"] = expires_at
+        merge_extra(extra, reserved=("name", "limit", "expires_at"))
         if extra:
             body.update(extra)
         return self._http._json(await self._http.apost("keys", json=body))

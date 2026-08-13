@@ -32,7 +32,7 @@ class Completions:
             body["max_tokens"] = max_tokens
         if temperature is not None:
             body["temperature"] = temperature
-        merge_extra(extra, reserved=("model", "prompt"))
+        merge_extra(extra, reserved=("model", "prompt", "max_tokens", "temperature"))
         if extra:
             body.update(extra)
         response = self._http.post("completions", json=body)
@@ -54,7 +54,7 @@ class Completions:
             body["max_tokens"] = max_tokens
         if temperature is not None:
             body["temperature"] = temperature
-        merge_extra(extra, reserved=("model", "prompt"))
+        merge_extra(extra, reserved=("model", "prompt", "max_tokens", "temperature"))
         if extra:
             body.update(extra)
         response = await self._http.apost("completions", json=body)

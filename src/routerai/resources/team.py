@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from .._extras import merge_extra
+
 if TYPE_CHECKING:
     from .._http import HTTPClient
 
@@ -36,6 +38,17 @@ class Team:
             body["spending_limit_period"] = spending_limit_period
         if password:
             body["password"] = password
+        merge_extra(
+            extra,
+            reserved=(
+                "email",
+                "role",
+                "monthly_spending_limit",
+                "spending_limit_period",
+                "send_email",
+                "password",
+            ),
+        )
         if extra:
             body.update(extra)
         return self._http._json(self._http.post("team/members", json=body))
@@ -58,6 +71,17 @@ class Team:
             body["spending_limit_period"] = spending_limit_period
         if password:
             body["password"] = password
+        merge_extra(
+            extra,
+            reserved=(
+                "email",
+                "role",
+                "monthly_spending_limit",
+                "spending_limit_period",
+                "send_email",
+                "password",
+            ),
+        )
         if extra:
             body.update(extra)
         return self._http._json(await self._http.apost("team/members", json=body))
@@ -87,6 +111,7 @@ class Team:
         extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"email": email, "role": role, "send_email": send_email}
+        merge_extra(extra, reserved=("email", "role", "send_email"))
         if extra:
             body.update(extra)
         return self._http._json(self._http.post("team/invitations", json=body))
@@ -100,6 +125,7 @@ class Team:
         extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"email": email, "role": role, "send_email": send_email}
+        merge_extra(extra, reserved=("email", "role", "send_email"))
         if extra:
             body.update(extra)
         return self._http._json(await self._http.apost("team/invitations", json=body))

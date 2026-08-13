@@ -88,7 +88,7 @@ class Audio:
         }
         if speed is not None:
             body["speed"] = speed
-        merge_extra(extra, reserved=("model", "input", "voice", "response_format"))
+        merge_extra(extra, reserved=("model", "input", "voice", "response_format", "speed"))
         if extra:
             body.update(extra)
         return body
@@ -205,7 +205,21 @@ class Audio:
             payload["temperature"] = temperature
         if provider:
             payload["provider"] = provider
-        merge_extra(extra, reserved=("model", "input_audio", "response_format"))
+        merge_extra(
+            extra,
+            reserved=(
+                "model",
+                "file",
+                "format",
+                "language",
+                "prompt",
+                "response_format",
+                "timestamp_granularities",
+                "temperature",
+                "provider",
+                "input_audio",
+            ),
+        )
         if extra:
             payload.update(extra)
         return payload
