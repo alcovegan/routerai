@@ -11,6 +11,7 @@ import pytest
 
 from routerai import Registry, RouterAI
 from routerai.errors import (
+    APIStatusError,
     AuthenticationError,
     StreamInterruptedError,
 )
@@ -69,12 +70,27 @@ def test_injected_clients_not_closed(respx_mock):
     asyncio.run(external_async.aclose())
 
 
-def test_owned_clients_closed():
+def test_owned_clients_closed(respx_mock):
+    respx_mock.get("https://routerai.ru/api/v1/models").mock(
+        return_value=httpx_response({"data": []})
+    )
     client = RouterAI(api_key="sk-test")
-    client._http.request("GET", "models") if False else None
+
+    client.models.all()
+    sync_client = client._http._sync_client
+    assert sync_client is not None
+    assert not sync_client.is_closed
     client.close()
+    assert sync_client.is_closed
     assert client._http._sync_client is None
+
+    client.models.clear_cache()  # force the async path to hit the network
+    asyncio.run(client.models.aall())
+    async_client = client._http._async_client
+    assert async_client is not None
+    assert not async_client.is_closed
     asyncio.run(client.aclose())
+    assert async_client.is_closed
     assert client._http._async_client is None
 
 
@@ -133,6 +149,26 @@ def test_consumer_exception_no_retry(respx_mock):
         consume()
     assert respx_mock.calls.call_count == 1
     client.close()
+
+
+async def test_async_midstream_disconnect_no_retry(respx_mock):
+    """Async parity: after the first chunk is delivered there is no retry."""
+
+    class BreakingAsyncStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"a"}}]}\n\n'
+            raise httpx.ReadError("connection lost")
+
+    respx_mock.post("https://routerai.ru/api/v1/chat/completions").mock(
+        return_value=httpx.Response(200, stream=BreakingAsyncStream())
+    )
+    client = RouterAI(api_key="sk-test", max_retries=2, retry_backoff=0.01)
+    with pytest.raises(StreamInterruptedError) as exc_info:
+        async for _ in client.chat.astream("m", "x"):
+            pass
+    assert exc_info.value.chunks_received == 1
+    assert respx_mock.calls.call_count == 1
+    await client.aclose()
 
 
 # --- REGISTRY-01: registry isolation ---
@@ -201,18 +237,21 @@ async def test_async_cache_honors_ttl(respx_mock):
 
 
 async def test_async_cache_single_flight(respx_mock):
-    route = respx_mock.get("https://routerai.ru/api/v1/models").mock(
-        return_value=httpx_response({"data": CATALOG})
-    )
+    entered = 0
+    max_entered = 0
+
+    async def handler(request):
+        nonlocal entered, max_entered
+        entered += 1
+        max_entered = max(max_entered, entered)
+        await asyncio.sleep(0.05)
+        entered -= 1
+        return httpx_response({"data": CATALOG})
+
+    route = respx_mock.get("https://routerai.ru/api/v1/models").mock(side_effect=handler)
     client = RouterAI(api_key="sk-test")
-
-    async def delayed():
-        import time
-
-        time.sleep(0.05)
-        return route
-
     await asyncio.gather(*(client.models.aall() for _ in range(10)))
+    assert max_entered == 1  # callers overlapped, refresh was single-flight
     assert route.call_count == 1
     await client.aclose()
 
@@ -330,3 +369,133 @@ def test_request_body_is_valid_json():
 
     body = {"model": "m", "messages": _messages("x")}
     assert json.loads(json.dumps(body)) == body
+
+
+# --- API-02: public exceptions exported from the top-level package ---
+
+
+def test_public_exceptions_exported():
+    import routerai
+
+    assert routerai.StreamInterruptedError is StreamInterruptedError
+    assert routerai.ConfigurationError is routerai.errors.ConfigurationError
+    assert "StreamInterruptedError" in routerai.__all__
+    assert "ConfigurationError" in routerai.__all__
+
+
+# --- HTTP-02: APIStatusError carries the response body ---
+
+
+def test_api_status_error_body_sync(respx_mock):
+    payload = {"error": {"code": "trace-1", "message": "upstream exploded"}}
+    respx_mock.post("https://routerai.ru/api/v1/chat/completions").mock(
+        return_value=httpx_response(payload, status_code=500)
+    )
+    client = RouterAI(api_key="sk-test", max_retries=0)
+    with pytest.raises(APIStatusError) as exc_info:
+        client.chat.complete("m", "x")
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.body == payload
+    client.close()
+
+
+async def test_api_status_error_body_async(respx_mock):
+    payload = {"error": {"code": "trace-2", "message": "upstream exploded"}}
+    respx_mock.post("https://routerai.ru/api/v1/chat/completions").mock(
+        return_value=httpx_response(payload, status_code=502)
+    )
+    client = RouterAI(api_key="sk-test", max_retries=0)
+    with pytest.raises(APIStatusError) as exc_info:
+        await client.chat.acomplete("m", "x")
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.body == payload
+    await client.aclose()
+
+
+def test_api_status_error_body_stream(respx_mock):
+    payload = {"error": {"message": "rejected early"}}
+    respx_mock.post("https://routerai.ru/api/v1/chat/completions").mock(
+        return_value=httpx_response(payload, status_code=500)
+    )
+    client = RouterAI(api_key="sk-test", max_retries=0)
+    with pytest.raises(APIStatusError) as exc_info:
+        list(client.chat.stream("m", "x"))
+    assert exc_info.value.body == payload
+    client.close()
+
+
+# --- REGISTRY-02: removed clients must not be restored from context tokens ---
+
+
+def test_registry_remove_inside_using_context():
+    a = RouterAI(api_key="sk-a")
+    b = RouterAI(api_key="sk-b")
+    reg = Registry(a=a, b=b)
+    with reg.using("a"):
+        assert reg.current() is a
+        reg.remove("a")
+        assert reg.current() is b
+    assert reg.current() is b
+    assert "a" not in reg
+    reg.close_all()
+
+
+def test_registry_nested_using_remove():
+    a = RouterAI(api_key="sk-a")
+    b = RouterAI(api_key="sk-b")
+    c = RouterAI(api_key="sk-c")
+    reg = Registry(a=a, b=b, c=c)
+    with reg.using("a"):
+        with reg.using("b"):
+            reg.remove("b")
+            assert reg.current() is a  # inner context restored, "b" gone
+        assert reg.current() is a
+    assert reg.current() is a
+    reg.close_all()
+
+
+# --- AUDIO-02: BinaryIO with non-string name + explicit format ---
+
+
+def test_transcribe_temporary_file_with_explicit_format(respx_mock):
+    import tempfile
+
+    respx_mock.post("https://routerai.ru/api/v1/audio/transcriptions").mock(
+        return_value=httpx_response({"text": "ok"})
+    )
+    client = RouterAI(api_key="sk-test")
+    with tempfile.TemporaryFile("w+b") as audio:
+        audio.write(b"fake-audio")
+        audio.seek(0)
+        assert not isinstance(audio.name, str)
+        result = client.audio.transcribe("openai/whisper-large-v3", audio, format="mp3")
+    assert result.text == "ok"
+    body = json.loads(respx_mock.calls.last.request.content)
+    assert body["input_audio"]["format"] == "mp3"
+    client.close()
+
+
+def test_transcribe_bytesio_without_name_requires_format(respx_mock):
+    import io
+
+    respx_mock.post("https://routerai.ru/api/v1/audio/transcriptions").mock(
+        return_value=httpx_response({"text": "ok"})
+    )
+    client = RouterAI(api_key="sk-test")
+    with pytest.raises(ValueError, match="format="):
+        client.audio.transcribe("openai/whisper-large-v3", io.BytesIO(b"x"))
+    assert respx_mock.calls.call_count == 0
+    client.close()
+
+
+def test_transcribe_explicit_format_overrides_suffix(respx_mock, tmp_path):
+    respx_mock.post("https://routerai.ru/api/v1/audio/transcriptions").mock(
+        return_value=httpx_response({"text": "ok"})
+    )
+    client = RouterAI(api_key="sk-test")
+    audio = tmp_path / "audio.wav"
+    audio.write_bytes(b"RIFFDATA")
+    client.audio.transcribe("openai/whisper-large-v3", audio, format="flac")
+    body = json.loads(respx_mock.calls.last.request.content)
+    assert body["input_audio"]["format"] == "flac"
+    client.close()
