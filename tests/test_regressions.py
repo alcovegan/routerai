@@ -351,9 +351,7 @@ def test_reasoning_key_parsed(respx_mock):
 def test_retry_after_header_controls_delay(respx_mock):
     route = respx_mock.get("https://routerai.ru/api/v1/models").mock(
         side_effect=[
-            httpx_response(
-                {"error": "slow down"}, status_code=429, headers={"Retry-After": "0.01"}
-            ),
+            httpx_response({"error": "slow down"}, status_code=429, headers={"Retry-After": "1"}),
             httpx_response({"data": []}),
         ]
     )
@@ -362,7 +360,54 @@ def test_retry_after_header_controls_delay(respx_mock):
     client.models.all()
     elapsed = __import__("time").monotonic() - started
     assert route.call_count == 2
-    assert elapsed < 3  # Retry-After (0.01) honored instead of backoff (10s)
+    assert elapsed < 3  # Retry-After (1s) honored instead of backoff (10s)
+    client.close()
+
+
+def test_retry_after_invalid_falls_back_to_backoff(respx_mock):
+    """Inf Retry-After is not a valid RFC 9110 delay-seconds value."""
+    route = respx_mock.get("https://routerai.ru/api/v1/models").mock(
+        side_effect=[
+            httpx_response({"error": "slow down"}, status_code=429, headers={"Retry-After": "inf"}),
+            httpx_response({"data": []}),
+        ]
+    )
+    client = RouterAI(api_key="sk-test", max_retries=2, retry_backoff=0.01)
+    client.models.all()
+    assert route.call_count == 2
+    client.close()
+
+
+def test_retry_after_fractional_falls_back_to_backoff(respx_mock):
+    route = respx_mock.get("https://routerai.ru/api/v1/models").mock(
+        side_effect=[
+            httpx_response(
+                {"error": "slow down"}, status_code=429, headers={"Retry-After": "0.01"}
+            ),
+            httpx_response({"data": []}),
+        ]
+    )
+    client = RouterAI(api_key="sk-test", max_retries=2, retry_backoff=0.01)
+    client.models.all()
+    assert route.call_count == 2
+    client.close()
+
+
+def test_retry_after_clamped_to_max(respx_mock):
+    route = respx_mock.get("https://routerai.ru/api/v1/models").mock(
+        side_effect=[
+            httpx_response(
+                {"error": "slow down"}, status_code=429, headers={"Retry-After": "3600"}
+            ),
+            httpx_response({"data": []}),
+        ]
+    )
+    client = RouterAI(api_key="sk-test", max_retries=2, retry_backoff=0.01, max_retry_after=0.05)
+    started = __import__("time").monotonic()
+    client.models.all()
+    elapsed = __import__("time").monotonic() - started
+    assert route.call_count == 2
+    assert elapsed < 1  # 3600s header clamped to max_retry_after
     client.close()
 
 
@@ -833,4 +878,299 @@ def test_models_list_methods_exist(catalog_route):
     assert isinstance(Models.list, type(Models.all))
     client = RouterAI(api_key="sk-test")
     assert len(client.models.list()) == 3
+    client.close()
+
+
+# --- audit 4: EXTRA-02 full reserved-param policy ---
+
+
+@pytest.mark.parametrize(
+    ("call", "body_key"),
+    [
+        ("chat", "temperature"),
+        ("chat", "tools"),
+        ("image", "quality"),
+        ("tts", "speed"),
+        ("stt", "language"),
+        ("embedding", "dimensions"),
+        ("rerank", "top_n"),
+        ("completion", "max_tokens"),
+        ("key", "name"),
+        ("team_member", "email"),
+        ("team_invite", "role"),
+        ("video", "duration"),
+    ],
+)
+def test_extra_cannot_override_dedicated_arguments(respx_mock, call, body_key):
+    client = RouterAI(api_key="sk-test")
+    with pytest.raises(ValueError, match="library-managed"):
+        if call == "chat":
+            client.chat.complete("m", "x", temperature=0.1, extra={body_key: 1.9})
+        elif call == "image":
+            client.images.generate("m", "p", quality="high", extra={body_key: "low"})
+        elif call == "tts":
+            client.audio.speech("m", "x", "eve", speed=1.0, extra={body_key: 2.0})
+        elif call == "stt":
+            client.audio.transcribe("m", b"x", format="mp3", language="ru", extra={body_key: "en"})
+        elif call == "embedding":
+            client.embeddings.create("m", "x", dimensions=128, extra={body_key: 64})
+        elif call == "rerank":
+            client.rerank.create("m", "q", ["d"], top_n=1, extra={body_key: 3})
+        elif call == "completion":
+            client.completions.create("m", "p", max_tokens=10, extra={body_key: 50})
+        elif call == "key":
+            client.keys.create("prod", extra={body_key: "other"})
+        elif call == "team_member":
+            client.team.create_member("a@b.c", extra={body_key: "x@y.z"})
+        elif call == "team_invite":
+            client.team.invite("a@b.c", extra={body_key: "admin"})
+        elif call == "video":
+            client.videos.create("m", "p", duration=4, extra={body_key: 10})
+    assert respx_mock.calls.call_count == 0
+    client.close()
+
+
+# --- audit 4: VIDEO-04 strict typed inputs ---
+
+
+def test_video_invalid_frame_type_rejected():
+    from pydantic import ValidationError
+
+    from routerai import FrameImage
+
+    with pytest.raises(ValidationError):
+        FrameImage(url="https://x/f.png", frame_type="middle")
+
+
+def test_video_raw_dict_validated(respx_mock):
+    respx_mock.post("https://routerai.ru/api/v1/videos").mock(
+        return_value=httpx_response({"id": "v1", "status": "pending"})
+    )
+    client = RouterAI(api_key="sk-test")
+    with pytest.raises(Exception, match="frame_type"):
+        client.videos.create(
+            "m", "p", frame_images=[{"url": "https://x/f.png", "frame_type": "middle"}]
+        )
+    assert respx_mock.calls.call_count == 0
+    client.close()
+
+
+def test_video_legacy_input_conflicts_with_references(respx_mock):
+    from routerai import ImageReference
+
+    respx_mock.post("https://routerai.ru/api/v1/videos").mock(
+        return_value=httpx_response({"id": "v1", "status": "pending"})
+    )
+    client = RouterAI(api_key="sk-test")
+    with pytest.warns(DeprecationWarning), pytest.raises(ValueError, match="mutually exclusive"):
+        client.videos.create(
+            "m",
+            "p",
+            image_input="https://x/f.png",
+            input_references=[ImageReference(url="https://x/r.png")],
+        )
+    assert respx_mock.calls.call_count == 0
+    client.close()
+
+
+def test_video_non_https_frame_url_rejected():
+    from pydantic import ValidationError
+
+    from routerai import FrameImage
+
+    with pytest.raises(ValidationError, match="https"):
+        FrameImage(url="http://x/f.png")
+
+
+def test_video_frame_extra_forbidden():
+    from pydantic import ValidationError
+
+    from routerai import FrameImage
+
+    with pytest.raises(ValidationError):
+        FrameImage(url="https://x/f.png", provider_hint="x")
+
+
+# --- audit 4: VIDEO-05 finite polling deadline ---
+
+
+@pytest.mark.parametrize(
+    ("timeout", "interval"),
+    [(float("nan"), 1.0), (1.0, float("nan")), (float("inf"), 1.0), (1.0, float("-inf"))],
+)
+def test_video_wait_rejects_non_finite(respx_mock, timeout, interval):
+    respx_mock.post("https://routerai.ru/api/v1/videos").mock(
+        return_value=httpx_response({"id": "v1", "status": "pending"})
+    )
+    client = RouterAI(api_key="sk-test")
+    task = client.videos.create("m", "p")
+    with pytest.raises(ValueError):
+        task.wait(timeout=timeout, interval=interval)
+    client.close()
+
+
+def test_video_wait_bounds_slow_refresh(respx_mock):
+    """A slow refresh must not exceed the overall budget by much."""
+    respx_mock.post("https://routerai.ru/api/v1/videos").mock(
+        return_value=httpx_response({"id": "v1", "status": "pending"})
+    )
+    respx_mock.get("https://routerai.ru/api/v1/videos/v1").mock(
+        side_effect=lambda request: httpx_response({"id": "v1", "status": "pending"})
+    )
+    client = RouterAI(api_key="sk-test", timeout=10)
+    task = client.videos.create("m", "p")
+    with pytest.raises(RouterAIError, match="not finished"):
+        task.wait(timeout=0.05, interval=0.02)
+    client.close()
+
+
+# --- audit 4: IMG-03 redirect safety ---
+
+
+def test_image_download_rejects_https_to_http_redirect(respx_mock, tmp_path):
+    import httpx as _httpx
+
+    respx_mock.get("https://provider.example/image").mock(
+        return_value=_httpx.Response(302, headers={"Location": "http://plain.example/image"})
+    )
+    respx_mock.get("http://plain.example/image").mock(return_value=httpx_response(b"png-bytes"))
+    from routerai.resources.images import GeneratedImage
+
+    image = GeneratedImage(url="https://provider.example/image")
+    with pytest.raises(RouterAIError, match="non-https"):
+        image.download(tmp_path / "i.png")
+    assert not (tmp_path / "i.png").exists()
+    assert respx_mock.calls.call_count == 1  # the http hop was never called
+
+
+def test_image_download_rejects_userinfo(respx_mock, tmp_path):
+    from routerai.resources.images import GeneratedImage
+
+    image = GeneratedImage(url="https://user:pass@provider.example/image")
+    with pytest.raises(RouterAIError, match="credentials"):
+        image.download(tmp_path / "i.png")
+
+
+def test_image_download_streams_atomically(respx_mock, tmp_path):
+    respx_mock.get("https://provider.example/image").mock(
+        return_value=httpx_response(b"png-bytes", headers={"Content-Type": "image/png"})
+    )
+    from routerai.resources.images import GeneratedImage
+
+    image = GeneratedImage(url="https://provider.example/image")
+    path = image.download(tmp_path / "i.png")
+    assert path.read_bytes() == b"png-bytes"
+    assert not (tmp_path / ".i.png.part").exists()
+
+
+# --- audit 4: HTTP-03 mixed-case media type ---
+
+
+def test_mixed_case_json_error_detected(respx_mock):
+    import httpx as _httpx
+
+    payload = {"error": {"message": "boom"}}
+    respx_mock.post("https://routerai.ru/api/v1/chat/completions").mock(
+        return_value=_httpx.Response(
+            200, json=payload, headers={"Content-Type": "Application/JSON"}
+        )
+    )
+    client = RouterAI(api_key="sk-test", max_retries=0)
+    with pytest.raises(APIStatusError) as exc_info:
+        client.chat.complete("m", "x")
+    assert exc_info.value.body == payload
+    client.close()
+
+
+# --- audit 4: STREAM-05 safe sse status ---
+
+
+def test_sse_error_non_numeric_status(respx_mock):
+    respx_mock.post("https://routerai.ru/api/v1/chat/completions").mock(
+        return_value=httpx_response(
+            b'data: {"error":{"message":"boom","status_code":"unknown"}}\n\n'
+        )
+    )
+    client = RouterAI(api_key="sk-test", max_retries=0)
+    with pytest.raises(APIStatusError) as exc_info:
+        list(client.chat.stream("m", "x"))
+    assert exc_info.value.status_code == 502
+    client.close()
+
+
+# --- audit 4: API-03 top-level exports ---
+
+
+def test_video_public_types_exported():
+    import routerai
+
+    assert routerai.VideoGenerationError is routerai.errors.VideoGenerationError
+    assert routerai.FrameImage is routerai.resources.videos.FrameImage
+    assert routerai.ImageReference is routerai.resources.videos.ImageReference
+    assert "VideoGenerationError" in routerai.__all__
+
+
+# --- audit 4: CONFIG-03 explicit config precedence ---
+
+
+def test_explicit_empty_api_key_rejected(monkeypatch):
+    monkeypatch.setenv("ROUTERAI_API_KEY", "sk-env-secret")
+    with pytest.raises(ConfigurationError, match="api_key"):
+        RouterAI(api_key="")
+
+
+def test_explicit_empty_base_url_rejected(monkeypatch):
+    monkeypatch.setenv("ROUTERAI_BASE_URL", "https://env.example/v1")
+    with pytest.raises(ConfigurationError, match="base_url"):
+        RouterAI(api_key="sk-test", base_url="  ")
+
+
+def test_none_falls_back_to_env(monkeypatch):
+    monkeypatch.setenv("ROUTERAI_API_KEY", "sk-env-secret")
+    monkeypatch.setenv("ROUTERAI_BASE_URL", "https://env.example/v1")
+    client = RouterAI(api_key=None, base_url=None)
+    assert client._http._api_key == "sk-env-secret"
+    assert client._http._base_url == "https://env.example/v1"
+    client.close()
+
+
+# --- audit 4: VIDEO-06 indexed downloads ---
+
+
+def test_video_content_index_query(respx_mock):
+    respx_mock.post("https://routerai.ru/api/v1/videos").mock(
+        return_value=httpx_response({"id": "v1", "status": "pending"})
+    )
+    client = RouterAI(api_key="sk-test")
+    task = client.videos.create("m", "p")
+    task._apply(
+        {
+            "id": "v1",
+            "status": "completed",
+            "unsigned_urls": ["https://x/0.mp4", "https://x/1.mp4"],
+        }
+    )
+    respx_mock.get("https://routerai.ru/api/v1/videos/v1/content?index=1").mock(
+        return_value=httpx_response(b"mp4-bytes")
+    )
+    assert task.content(index=1) == b"mp4-bytes"
+    with pytest.raises(ValueError, match="out of range"):
+        task.content(index=2)
+    client.close()
+
+
+def test_video_save_streams_to_file(respx_mock, tmp_path):
+    respx_mock.post("https://routerai.ru/api/v1/videos").mock(
+        return_value=httpx_response({"id": "v1", "status": "pending"})
+    )
+    client = RouterAI(api_key="sk-test")
+    task = client.videos.create("m", "p")
+    task._apply({"id": "v1", "status": "completed", "unsigned_urls": ["https://x/0.mp4"]})
+    respx_mock.get("https://routerai.ru/api/v1/videos/v1/content?index=0").mock(
+        return_value=httpx_response(b"mp4-content")
+    )
+    path = task.save(str(tmp_path / "out.mp4"))
+    with open(path, "rb") as handle:
+        assert handle.read() == b"mp4-content"
+    assert not (tmp_path / ".out.mp4.part").exists()
     client.close()
