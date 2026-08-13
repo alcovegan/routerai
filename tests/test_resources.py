@@ -5,6 +5,8 @@ import logging
 from contextlib import suppress
 from decimal import Decimal
 
+import pytest
+
 from routerai import RouterAI
 
 from .conftest import httpx_response
@@ -34,13 +36,16 @@ def test_audio_speech_returns_bytes(respx_mock, tmp_path):
         return_value=httpx_response(b"mp3-bytes")
     )
     client = RouterAI(api_key="sk-test")
-    result = client.audio.speech("openai/tts-1", "Привет")
+    result = client.audio.speech("x-ai/grok-voice-tts-1.0", "Привет", voice="eve")
     assert result.data == b"mp3-bytes"
     assert result.save(tmp_path / "hi.mp3").read_bytes() == b"mp3-bytes"
+    body = __import__("json").loads(respx_mock.calls.last.request.content)
+    assert body["voice"] == "eve"
+    assert body["response_format"] == "mp3"
     client.close()
 
 
-def test_audio_transcribe(respx_mock):
+def test_audio_transcribe_contract(respx_mock):
     respx_mock.post("https://routerai.ru/api/v1/audio/transcriptions").mock(
         return_value=httpx_response(
             {"text": "привет мир", "usage": {"seconds": 2.1, "cost": 0.01}},
@@ -48,10 +53,39 @@ def test_audio_transcribe(respx_mock):
         )
     )
     client = RouterAI(api_key="sk-test")
-    result = client.audio.transcribe("openai/whisper-1", b"fakeaudio")
+    result = client.audio.transcribe("openai/whisper-large-v3", b"fakeaudio", format="mp3")
     assert result.text == "привет мир"
     assert result.cost_rub == Decimal("0.01")
     assert result.generation_id == "gen-stt"
+
+    body = __import__("json").loads(respx_mock.calls.last.request.content)
+    assert body["model"] == "openai/whisper-large-v3"
+    assert body["input_audio"]["format"] == "mp3"
+    assert body["input_audio"]["data"] == base64.b64encode(b"fakeaudio").decode()
+    client.close()
+
+
+def test_audio_transcribe_infers_format_from_path(respx_mock, tmp_path):
+    respx_mock.post("https://routerai.ru/api/v1/audio/transcriptions").mock(
+        return_value=httpx_response({"text": "ok"})
+    )
+    client = RouterAI(api_key="sk-test")
+    audio = tmp_path / "voice.wav"
+    audio.write_bytes(b"RIFFDATA")
+    client.audio.transcribe("openai/whisper-large-v3", audio)
+    body = __import__("json").loads(respx_mock.calls.last.request.content)
+    assert body["input_audio"]["format"] == "wav"
+    client.close()
+
+
+def test_audio_transcribe_requires_format_for_raw_bytes(respx_mock):
+    respx_mock.post("https://routerai.ru/api/v1/audio/transcriptions").mock(
+        return_value=httpx_response({"text": "ok"})
+    )
+    client = RouterAI(api_key="sk-test")
+    with pytest.raises(ValueError, match="format="):
+        client.audio.transcribe("openai/whisper-large-v3", b"raw-bytes")
+    assert respx_mock.calls.call_count == 0
     client.close()
 
 
@@ -85,7 +119,14 @@ def test_video_task_polling(respx_mock):
         return_value=httpx_response({"id": "vid1", "status": "pending", "polling_url": "u"})
     )
     respx_mock.get("https://routerai.ru/api/v1/videos/vid1").mock(
-        return_value=httpx_response({"id": "vid1", "status": "completed", "url": "https://x/v.mp4"})
+        return_value=httpx_response(
+            {
+                "id": "vid1",
+                "status": "completed",
+                "unsigned_urls": ["https://x/v.mp4"],
+                "usage": {"cost": 18.2},
+            }
+        )
     )
     client = RouterAI(api_key="sk-test")
     task = client.videos.create("x-ai/grok-imagine-video", "кот")
@@ -93,6 +134,8 @@ def test_video_task_polling(respx_mock):
     task.wait(timeout=5, interval=0.01)
     assert task.done
     assert task.status == "completed"
+    assert task.cost_rub == Decimal("18.2")
+    assert task.urls == ["https://x/v.mp4"]
     client.close()
 
 

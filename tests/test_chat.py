@@ -6,6 +6,7 @@ import pytest
 
 from routerai import RouterAI
 from routerai.errors import (
+    APIStatusError,
     AuthenticationError,
     InsufficientFundsError,
     NoProviderError,
@@ -144,9 +145,35 @@ def test_retry_on_5xx_then_success(respx_mock):
             httpx_response(CHAT_PAYLOAD),
         ]
     )
-    client = RouterAI(api_key="sk-test", max_retries=2, retry_backoff=0.01)
+    client = RouterAI(
+        api_key="sk-test", max_retries=2, retry_backoff=0.01, retry_unsafe_methods=True
+    )
     result = client.chat.complete("m", "x")
     assert result.content == "Привет!"
+    assert route.call_count == 2
+    client.close()
+
+
+def test_post_5xx_not_retried_by_default(respx_mock):
+    route = respx_mock.post("https://routerai.ru/api/v1/chat/completions").mock(
+        return_value=httpx_response({"error": {"message": "boom"}}, status_code=503)
+    )
+    client = RouterAI(api_key="sk-test", max_retries=2, retry_backoff=0.01)
+    with pytest.raises(APIStatusError):
+        client.chat.complete("m", "x")
+    assert route.call_count == 1
+    client.close()
+
+
+def test_get_5xx_retried_by_default(respx_mock):
+    route = respx_mock.get("https://routerai.ru/api/v1/models").mock(
+        side_effect=[
+            httpx_response({"error": {"message": "boom"}}, status_code=503),
+            httpx_response({"data": []}),
+        ]
+    )
+    client = RouterAI(api_key="sk-test", max_retries=2, retry_backoff=0.01)
+    assert client.models.all() == []
     assert route.call_count == 2
     client.close()
 

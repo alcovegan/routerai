@@ -73,9 +73,7 @@ def test_models_by_capability_and_grouped(catalog_route):
 
 
 def test_models_endpoints(respx_mock):
-    respx_mock.get(
-        "https://routerai.ru/api/v1/models/deepseek/deepseek-v4-pro/endpoints"
-    ).mock(
+    respx_mock.get("https://routerai.ru/api/v1/models/deepseek/deepseek-v4-pro/endpoints").mock(
         return_value=httpx_response(
             {
                 "data": {
