@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 from decimal import Decimal
 from pathlib import Path
@@ -10,9 +11,28 @@ from ..schemas import Usage
 if TYPE_CHECKING:
     from .._http import HTTPClient
 
+SUPPORTED_AUDIO_FORMATS = {"mp3", "wav", "flac", "m4a", "ogg", "webm", "aac"}
+_SUFFIX_FORMATS = {"mpeg": "mp3", "wave": "wav", "oga": "ogg", "mp4": "m4a"}
+
+
+def _format_from_name(name: str | None) -> str | None:
+    if not name:
+        return None
+    suffix = Path(name).suffix.lstrip(".").lower()
+    if not suffix:
+        return None
+    if suffix in SUPPORTED_AUDIO_FORMATS:
+        return suffix
+    return _SUFFIX_FORMATS.get(suffix)
+
 
 class Audio:
-    """Audio generation, transcription and translation."""
+    """Audio generation (TTS) and transcription (STT).
+
+    STT uses the documented RouterAI JSON contract
+    ``{"input_audio": {"data": base64, "format": "..."}}``; the format is
+    inferred from the file name and must be passed explicitly for raw bytes.
+    """
 
     def __init__(self, http: HTTPClient) -> None:
         self._http = http
@@ -23,49 +43,52 @@ class Audio:
         self,
         model: str,
         input: str,
+        voice: str,
         *,
-        voice: str | None = None,
         response_format: str = "mp3",
         speed: float | None = None,
         extra: dict[str, Any] | None = None,
     ) -> SpeechResult:
-        body: dict[str, Any] = {
-            "model": model,
-            "input": input,
-            "response_format": response_format,
-        }
-        if voice:
-            body["voice"] = voice
-        if speed is not None:
-            body["speed"] = speed
-        if extra:
-            body.update(extra)
-        response = self._http.post("audio/speech", json=body)
+        response = self._http.post(
+            "audio/speech", json=self._tts_body(model, input, voice, response_format, speed, extra)
+        )
         return SpeechResult(response.content, response.headers.get("X-Generation-Id"))
 
     async def aspeech(
         self,
         model: str,
         input: str,
+        voice: str,
         *,
-        voice: str | None = None,
         response_format: str = "mp3",
         speed: float | None = None,
         extra: dict[str, Any] | None = None,
     ) -> SpeechResult:
+        response = await self._http.apost(
+            "audio/speech", json=self._tts_body(model, input, voice, response_format, speed, extra)
+        )
+        return SpeechResult(response.content, response.headers.get("X-Generation-Id"))
+
+    def _tts_body(
+        self,
+        model: str,
+        input: str,
+        voice: str,
+        response_format: str,
+        speed: float | None,
+        extra: dict[str, Any] | None,
+    ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "model": model,
             "input": input,
+            "voice": voice,
             "response_format": response_format,
         }
-        if voice:
-            body["voice"] = voice
         if speed is not None:
             body["speed"] = speed
         if extra:
             body.update(extra)
-        response = await self._http.apost("audio/speech", json=body)
-        return SpeechResult(response.content, response.headers.get("X-Generation-Id"))
+        return body
 
     # --- STT ---
 
@@ -74,13 +97,30 @@ class Audio:
         model: str,
         file: str | Path | bytes | BinaryIO,
         *,
+        format: str | None = None,
         language: str | None = None,
         prompt: str | None = None,
         response_format: str = "json",
+        timestamp_granularities: list[str] | None = None,
+        temperature: float | None = None,
+        provider: dict[str, Any] | None = None,
         extra: dict[str, Any] | None = None,
     ) -> TranscriptionResult:
-        return self._transcribe(
-            "audio/transcriptions", model, file, language, prompt, response_format, extra
+        payload = self._stt_payload(
+            model,
+            file,
+            format,
+            language,
+            prompt,
+            response_format,
+            timestamp_granularities,
+            temperature,
+            provider,
+            extra,
+        )
+        response = self._http.post("audio/transcriptions", json=payload)
+        return TranscriptionResult.from_response(
+            self._http._json(response), response.headers.get("X-Generation-Id")
         )
 
     async def atranscribe(
@@ -88,111 +128,94 @@ class Audio:
         model: str,
         file: str | Path | bytes | BinaryIO,
         *,
+        format: str | None = None,
         language: str | None = None,
         prompt: str | None = None,
         response_format: str = "json",
+        timestamp_granularities: list[str] | None = None,
+        temperature: float | None = None,
+        provider: dict[str, Any] | None = None,
         extra: dict[str, Any] | None = None,
     ) -> TranscriptionResult:
-        return await self._atranscribe(
-            "audio/transcriptions", model, file, language, prompt, response_format, extra
+        payload = await asyncio.to_thread(
+            self._stt_payload,
+            model,
+            file,
+            format,
+            language,
+            prompt,
+            response_format,
+            timestamp_granularities,
+            temperature,
+            provider,
+            extra,
         )
-
-    def translate(
-        self,
-        model: str,
-        file: str | Path | bytes | BinaryIO,
-        *,
-        language: str | None = None,
-        prompt: str | None = None,
-        response_format: str = "json",
-        extra: dict[str, Any] | None = None,
-    ) -> TranscriptionResult:
-        return self._transcribe(
-            "audio/translations", model, file, language, prompt, response_format, extra
-        )
-
-    async def atranslate(
-        self,
-        model: str,
-        file: str | Path | bytes | BinaryIO,
-        *,
-        language: str | None = None,
-        prompt: str | None = None,
-        response_format: str = "json",
-        extra: dict[str, Any] | None = None,
-    ) -> TranscriptionResult:
-        return await self._atranscribe(
-            "audio/translations", model, file, language, prompt, response_format, extra
-        )
-
-    def _transcribe(
-        self,
-        path: str,
-        model: str,
-        file: str | Path | bytes | BinaryIO,
-        language: str | None,
-        prompt: str | None,
-        response_format: str,
-        extra: dict[str, Any] | None,
-    ) -> TranscriptionResult:
-        payload = self._stt_payload(model, file, language, prompt, response_format, extra)
-        response = self._http.post(path, json=payload)
+        response = await self._http.apost("audio/transcriptions", json=payload)
         return TranscriptionResult.from_response(
-            response.json(), response.headers.get("X-Generation-Id")
-        )
-
-    async def _atranscribe(
-        self,
-        path: str,
-        model: str,
-        file: str | Path | bytes | BinaryIO,
-        language: str | None,
-        prompt: str | None,
-        response_format: str,
-        extra: dict[str, Any] | None,
-    ) -> TranscriptionResult:
-        payload = self._stt_payload(model, file, language, prompt, response_format, extra)
-        response = await self._http.apost(path, json=payload)
-        return TranscriptionResult.from_response(
-            response.json(), response.headers.get("X-Generation-Id")
+            self._http._json(response), response.headers.get("X-Generation-Id")
         )
 
     def _stt_payload(
         self,
         model: str,
         file: str | Path | bytes | BinaryIO,
+        format: str | None,
         language: str | None,
         prompt: str | None,
         response_format: str,
+        timestamp_granularities: list[str] | None,
+        temperature: float | None,
+        provider: dict[str, Any] | None,
         extra: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        payload: dict[str, Any] = {"model": model, "response_format": response_format}
-        if isinstance(file, (str, Path)):
-            path = Path(file)
-            payload["file"] = {
-                "filename": path.name,
-                "file_data": base64.b64encode(path.read_bytes()).decode(),
-            }
-        elif hasattr(file, "read"):
-            stream = file.read()
-            assert isinstance(stream, bytes)
-            payload["file"] = {
-                "filename": getattr(file, "name", "audio.bin") or "audio.bin",
-                "file_data": base64.b64encode(stream).decode(),
-            }
-        else:
-            assert isinstance(file, bytes)
-            payload["file"] = {
-                "filename": "audio.bin",
-                "file_data": base64.b64encode(file).decode(),
-            }
+        data, name = _read_audio(file)
+        audio_format = _format_from_name(name)
+        if audio_format is None:
+            if format is None:
+                raise ValueError(
+                    "cannot infer audio format from the file name; pass format= explicitly "
+                    f"(one of {sorted(SUPPORTED_AUDIO_FORMATS)})"
+                )
+            audio_format = format
+        audio_format = audio_format.lower()
+        if audio_format not in SUPPORTED_AUDIO_FORMATS:
+            raise ValueError(
+                f"unsupported audio format {audio_format!r}; supported: {sorted(SUPPORTED_AUDIO_FORMATS)}"
+            )
+
+        payload: dict[str, Any] = {
+            "model": model,
+            "input_audio": {
+                "data": base64.b64encode(data).decode("ascii"),
+                "format": audio_format,
+            },
+            "response_format": response_format,
+        }
         if language:
             payload["language"] = language
         if prompt:
             payload["prompt"] = prompt
+        if timestamp_granularities:
+            payload["timestamp_granularities"] = timestamp_granularities
+        if temperature is not None:
+            payload["temperature"] = temperature
+        if provider:
+            payload["provider"] = provider
         if extra:
             payload.update(extra)
         return payload
+
+
+def _read_audio(file: str | Path | bytes | BinaryIO) -> tuple[bytes, str | None]:
+    if isinstance(file, (str, Path)):
+        path = Path(file)
+        return path.read_bytes(), path.name
+    if isinstance(file, bytes):
+        return file, None
+    name = getattr(file, "name", None)
+    stream = file.read()
+    assert isinstance(stream, bytes)
+    return stream, name
 
 
 class SpeechResult:
