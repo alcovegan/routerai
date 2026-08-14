@@ -52,6 +52,7 @@ from .schemas import (
     ToolCall,
     Usage,
 )
+from .usage import UsageRecord, UsageStats, UsageTracker
 from .webhooks import signing_secret, verify_video
 
 __all__ = [
@@ -110,6 +111,9 @@ __all__ = [
     "TranscriptionResult",
     "UnprocessableEntityError",
     "Usage",
+    "UsageRecord",
+    "UsageStats",
+    "UsageTracker",
     "VideoGenerationError",
     "VideoTask",
     "WebhookVerificationError",

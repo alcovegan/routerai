@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from typing import Any
 
 import httpx
@@ -20,6 +21,7 @@ from .resources.keys import Keys
 from .resources.models import Models
 from .resources.team import Team
 from .resources.videos import Videos
+from .usage import UsageHook, UsageTracker
 
 ENV_API_KEY = "ROUTERAI_API_KEY"
 ENV_BASE_URL = "ROUTERAI_BASE_URL"
@@ -113,6 +115,29 @@ class RouterAI:
     @property
     def logger(self) -> logging.Logger:
         return self._http.logger
+
+    @property
+    def usage(self) -> UsageTracker:
+        """Running totals for this client: requests, tokens and rubles."""
+        return self._http.usage
+
+    @contextmanager
+    def track(self, label: str | None = None) -> Iterator[UsageTracker]:
+        """Count what the calls inside this block cost.
+
+        Tasks started inside the block share the tracker; a task started before
+        it will not be counted, because the context was copied without it.
+        """
+        tracker = UsageTracker(label=label)
+        token = self._http.push_tracker(tracker)
+        try:
+            yield tracker
+        finally:
+            self._http.pop_tracker(token)
+
+    def on_usage(self, hook: UsageHook) -> Callable[[], None]:
+        """Call ``hook`` after every request; returns an unsubscribe callable."""
+        return self._http.on_usage(hook)
 
     def close(self) -> None:
         self._http.close()

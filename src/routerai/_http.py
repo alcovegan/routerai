@@ -4,8 +4,10 @@ import logging
 import platform
 import random
 import time
-from collections.abc import AsyncIterator, Iterator, Mapping
-from contextlib import asynccontextmanager, contextmanager
+from collections import OrderedDict
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
+from contextlib import asynccontextmanager, contextmanager, suppress
+from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from json import loads as _json_loads
 from typing import TYPE_CHECKING, Any
@@ -25,6 +27,7 @@ from .errors import (
     ResponseParsingError,
 )
 from .logging import log_request, mask_key
+from .usage import UsageHook, UsageTracker, record_from
 
 if TYPE_CHECKING:
     from typing_extensions import Unpack
@@ -159,6 +162,36 @@ class ResponseEnvelope:
         return getattr(self._response, name)
 
 
+class StreamEnvelope:
+    """An open stream that remembers what the last chunk said it cost.
+
+    A context variable cannot be used for this: generators do not carry their
+    own context, so interleaving two streams would file one stream's usage
+    under the other. The chunk reader hands its payload here instead.
+    """
+
+    def __init__(self, response: httpx.Response) -> None:
+        self._response = response
+        self.usage_payload: dict[str, Any] | None = None
+        self.model: str | None = None
+
+    @property
+    def generation_id(self) -> str | None:
+        value = self._response.headers.get("X-Generation-Id")
+        return str(value) if value else None
+
+    def note_chunk(self, payload: Mapping[str, Any]) -> None:
+        usage = payload.get("usage")
+        if isinstance(usage, Mapping):
+            self.usage_payload = dict(usage)
+        model = payload.get("model")
+        if isinstance(model, str):
+            self.model = model
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._response, name)
+
+
 def _stream_body(response: httpx.Response) -> Any:
     """Decoded body of a streamed response, for error mapping."""
     try:
@@ -269,6 +302,14 @@ class HTTPClient:
         self._owns_async = self._async_client is None
         self._sync_closed = False
         self._async_closed = False
+        self.usage = UsageTracker()
+        self._trackers: ContextVar[tuple[UsageTracker, ...]] = ContextVar(
+            f"routerai_trackers_{id(self)}", default=()
+        )
+        self._usage_hooks: list[UsageHook] = []
+        # Polling a video returns the same usage on every refresh; without this
+        # the cost of one generation would be counted once per poll.
+        self._counted_generations: OrderedDict[str, None] = OrderedDict()
 
     @property
     def logger(self) -> logging.Logger:
@@ -443,39 +484,86 @@ class HTTPClient:
                 raise DeadlineExceededError("deadline exceeded during retry backoff")
         await asyncio.sleep(delay)
 
-    def _log_result(
-        self, response: httpx.Response | ResponseEnvelope, method: str, url: str, elapsed: float
+    def _observe(
+        self,
+        *,
+        method: str,
+        url: str,
+        status: int | None,
+        elapsed: float,
+        body: Any = None,
+        label: str | None = None,
+        streamed: bool = False,
+        generation_id: str | None = None,
+        request_id: str | None = None,
     ) -> None:
-        if not self._logger.isEnabledFor(logging.INFO):
-            return
-        tokens = cost = None
-        if isinstance(response, ResponseEnvelope):
-            body = response.body
-            if isinstance(body, dict):
-                usage = body.get("usage")
-                if isinstance(usage, dict):
-                    tokens = usage.get("total_tokens")
-                    cost = usage.get("cost")
-        else:
-            content_type = response.headers.get("content-type", "").lower()
-            if "json" in content_type:
-                try:
-                    payload = response.json()
-                    usage = payload.get("usage")
-                    if isinstance(usage, dict):
-                        tokens = usage.get("total_tokens")
-                        cost = usage.get("cost")
-                except ValueError:
-                    pass
+        """Account for one request, then log it.
+
+        Deliberately not gated on the log level: accounting that only works
+        when INFO logging happens to be on is accounting nobody can trust.
+        """
+        duplicate = False
+        if generation_id:
+            if generation_id in self._counted_generations:
+                duplicate = True
+            else:
+                self._counted_generations[generation_id] = None
+                if len(self._counted_generations) > 4096:
+                    self._counted_generations.popitem(last=False)
+        record = record_from(
+            method=method,
+            path=url,
+            status=status,
+            elapsed=elapsed,
+            body=body,
+            label=label,
+            streamed=streamed,
+            generation_id=generation_id,
+            request_id=request_id,
+            duplicate=duplicate,
+        )
+        self.usage.add(record)
+        for tracker in self._trackers.get():
+            tracker.add(record)
+        for hook in tuple(self._usage_hooks):
+            try:
+                hook(record)
+            except Exception:  # a callback must never break the call
+                self._logger.warning("usage callback failed", exc_info=True)
         log_request(
             self._logger,
             method,
             url,
             elapsed=elapsed,
-            status=response.status_code,
-            tokens=tokens,
-            cost=cost,
+            status=status,
+            tokens=record.total_tokens or None,
+            cost=record.cost_rub,
         )
+
+    def track(self, label: str | None = None) -> UsageTracker:
+        """Start a tracker for the current context; see RouterAI.track()."""
+        return UsageTracker(label=label)
+
+    def push_tracker(self, tracker: UsageTracker) -> Token[tuple[UsageTracker, ...]]:
+        return self._trackers.set((*self._trackers.get(), tracker))
+
+    def pop_tracker(self, token: Token[tuple[UsageTracker, ...]]) -> None:
+        self._trackers.reset(token)
+
+    def current_label(self) -> str | None:
+        for tracker in reversed(self._trackers.get()):
+            if tracker.label:
+                return tracker.label
+        return None
+
+    def on_usage(self, hook: UsageHook) -> Callable[[], None]:
+        self._usage_hooks.append(hook)
+
+        def unsubscribe() -> None:
+            with suppress(ValueError):
+                self._usage_hooks.remove(hook)
+
+        return unsubscribe
 
     # --- sync ---
 
@@ -545,7 +633,16 @@ class HTTPClient:
                 self._wait(attempt, response, deadline=deadline)
                 continue
             envelope = ResponseEnvelope(response)
-            self._log_result(envelope, method, url, elapsed)
+            self._observe(
+                method=method,
+                url=url,
+                status=envelope.status_code,
+                elapsed=elapsed,
+                body=envelope.body,
+                label=self.current_label(),
+                generation_id=envelope.generation_id,
+                request_id=envelope.request_id,
+            )
             _raise_for_status(
                 envelope.status_code,
                 envelope.body,
@@ -568,7 +665,7 @@ class HTTPClient:
         json: Any = None,
         content: bytes | None = None,
         **opts: Unpack[RequestOptions],
-    ) -> Iterator[httpx.Response]:
+    ) -> Iterator[StreamEnvelope]:
         """Open a streaming response.
 
         Retries happen only before the response is handed to the caller.
@@ -608,13 +705,6 @@ class HTTPClient:
                         )
                         self._wait(attempt, response)
                         continue
-                    log_request(
-                        self._logger,
-                        method,
-                        url,
-                        elapsed=time.monotonic() - started,
-                        status=response.status_code,
-                    )
                     if response.status_code >= 400:
                         _raise_for_status(
                             response.status_code,
@@ -622,7 +712,24 @@ class HTTPClient:
                             headers=response.headers,
                         )
                     yielded = True
-                    yield response
+                    envelope = StreamEnvelope(response)
+                    try:
+                        yield envelope
+                    finally:
+                        # finally, not after the yield: a caller that breaks out
+                        # early still paid for what the stream produced.
+                        self._observe(
+                            method=method,
+                            url=url,
+                            status=response.status_code,
+                            elapsed=time.monotonic() - started,
+                            body={"usage": envelope.usage_payload, "model": envelope.model}
+                            if envelope.usage_payload
+                            else None,
+                            label=self.current_label(),
+                            streamed=True,
+                            generation_id=envelope.generation_id,
+                        )
                     return
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 if yielded:
@@ -718,7 +825,16 @@ class HTTPClient:
                 await self._await(attempt, response, deadline=deadline)
                 continue
             envelope = ResponseEnvelope(response)
-            self._log_result(envelope, method, url, elapsed)
+            self._observe(
+                method=method,
+                url=url,
+                status=envelope.status_code,
+                elapsed=elapsed,
+                body=envelope.body,
+                label=self.current_label(),
+                generation_id=envelope.generation_id,
+                request_id=envelope.request_id,
+            )
             _raise_for_status(
                 envelope.status_code,
                 envelope.body,
@@ -741,7 +857,7 @@ class HTTPClient:
         json: Any = None,
         content: bytes | None = None,
         **opts: Unpack[RequestOptions],
-    ) -> AsyncIterator[httpx.Response]:
+    ) -> AsyncIterator[StreamEnvelope]:
         url = self._build_url(path)
         call = self._resolve(opts)
         request_headers = self._merge_headers(call.headers, content=content)
@@ -775,13 +891,6 @@ class HTTPClient:
                         )
                         await self._await(attempt, response)
                         continue
-                    log_request(
-                        self._logger,
-                        method,
-                        url,
-                        elapsed=time.monotonic() - started,
-                        status=response.status_code,
-                    )
                     if response.status_code >= 400:
                         # read the (async) body before mapping so the sync
                         # text/json accessors work on unread streams too
@@ -792,7 +901,24 @@ class HTTPClient:
                             headers=response.headers,
                         )
                     yielded = True
-                    yield response
+                    envelope = StreamEnvelope(response)
+                    try:
+                        yield envelope
+                    finally:
+                        # finally, not after the yield: a caller that breaks out
+                        # early still paid for what the stream produced.
+                        self._observe(
+                            method=method,
+                            url=url,
+                            status=response.status_code,
+                            elapsed=time.monotonic() - started,
+                            body={"usage": envelope.usage_payload, "model": envelope.model}
+                            if envelope.usage_payload
+                            else None,
+                            label=self.current_label(),
+                            streamed=True,
+                            generation_id=envelope.generation_id,
+                        )
                     return
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 if yielded:

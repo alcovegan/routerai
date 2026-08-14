@@ -432,6 +432,7 @@ def _iter_image_sse(
             if payload is None:
                 continue
             chunks_received += 1
+            response.note_chunk(payload)
             yield ImageStreamChunk(payload, generation_id=generation_id)
     except (httpx.TimeoutException, httpx.TransportError) as exc:
         raise StreamInterruptedError(
@@ -455,6 +456,7 @@ async def _aiter_image_sse(
             if payload is None:
                 continue
             chunks_received += 1
+            response.note_chunk(payload)
             yield ImageStreamChunk(payload, generation_id=generation_id)
     except (httpx.TimeoutException, httpx.TransportError) as exc:
         raise StreamInterruptedError(
