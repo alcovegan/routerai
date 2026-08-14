@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -7,6 +8,15 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .client import RouterAI
+
+# One module-level variable for every registry, keyed by registry id. Creating
+# a ContextVar per instance is the pattern CPython's docs warn about: each one
+# is kept alive by every context it was ever set in.
+_ACTIVE: ContextVar[dict[int, str] | None] = ContextVar("routerai_active_clients", default=None)
+
+
+def _active() -> dict[int, str]:
+    return _ACTIVE.get() or {}
 
 
 class Registry:
@@ -25,12 +35,8 @@ class Registry:
 
     def __init__(self, **clients: RouterAI) -> None:
         self._clients: dict[str, RouterAI] = dict(clients)
+        self._lock = threading.Lock()
         self._default: str | None = next(iter(self._clients), None)
-        self._active: ContextVar[str | None] = ContextVar(
-            f"routerai_registry_{id(self)}", default=None
-        )
-        if self._default is not None:
-            self._active.set(self._default)
 
     def __getitem__(self, name: str) -> RouterAI:
         return self._clients[name]
@@ -46,17 +52,22 @@ class Registry:
         return self._default
 
     def add(self, name: str, client: RouterAI, *, make_default: bool = False) -> None:
-        self._clients[name] = client
-        if make_default or self._default is None:
-            self._default = name
-            self._active.set(name)
+        """Register a client. The default is plain state, visible everywhere.
+
+        It used to be written to a context variable as well, so making a client
+        the default from inside a task changed ``default`` but not
+        ``current()`` for the caller.
+        """
+        with self._lock:
+            self._clients[name] = client
+            if make_default or self._default is None:
+                self._default = name
 
     def remove(self, name: str) -> None:
-        self._clients.pop(name)
-        if self._active.get() == name:
-            self._active.set(self._default)
-        if self._default == name:
-            self._default = next(iter(self._clients), None)
+        with self._lock:
+            self._clients.pop(name)
+            if self._default == name:
+                self._default = next(iter(self._clients), None)
 
     def current(self) -> RouterAI | None:
         """Client set by the last ``using`` context in this registry.
@@ -65,7 +76,7 @@ class Registry:
         current set of clients, so removed clients never leak back from a
         stale context token.
         """
-        name = self._active.get()
+        name = _active().get(id(self))
         if name is not None:
             client = self._clients.get(name)
             if client is not None:
@@ -80,22 +91,20 @@ class Registry:
     @contextmanager
     def using(self, name: str) -> Iterator[RouterAI]:
         client = self._clients[name]
-        token = self._active.set(name)
+        token = _ACTIVE.set({**_active(), id(self): name})
         try:
             yield client
         finally:
-            self._active.reset(token)
+            _ACTIVE.reset(token)
 
     def as_mapping(self) -> Mapping[str, RouterAI]:
         return dict(self._clients)
 
     def close_all(self) -> None:
-        self._active.set(None)
         for client in self._clients.values():
             client.close()
 
     async def aclose_all(self) -> None:
-        self._active.set(None)
         for client in self._clients.values():
             await client.aclose()
 

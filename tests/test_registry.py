@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from decimal import Decimal
 
 from routerai import Registry, RouterAI
@@ -46,3 +47,35 @@ def test_generation_cost(respx_mock):
     client = RouterAI(api_key="sk-test")
     assert client.generation.cost("gen-42") == Decimal("12.34")
     client.close()
+
+
+def test_default_set_from_a_task_is_visible_to_the_caller():
+    """The default is plain state; it used to be written to a context variable
+    as well, so making a client default inside a task changed `default` but
+    left `current()` pointing at the old client."""
+    first = RouterAI(api_key="sk-first")
+    second = RouterAI(api_key="sk-second")
+    registry = Registry(first=first)
+
+    async def main() -> None:
+        async def worker() -> None:
+            registry.add("second", second, make_default=True)
+
+        await asyncio.create_task(worker())
+        assert registry.default == "second"
+        assert registry.current() is second
+
+    asyncio.run(main())
+    registry.close_all()
+
+
+def test_using_still_scopes_to_its_block():
+    first = RouterAI(api_key="sk-first")
+    second = RouterAI(api_key="sk-second")
+    registry = Registry(first=first, second=second)
+
+    assert registry.current() is first
+    with registry.using("second"):
+        assert registry.current() is second
+    assert registry.current() is first
+    registry.close_all()

@@ -642,7 +642,6 @@ def test_sync_and_async_agree_on_a_missed_deadline():
         max_retries=0,
         http_client=httpx.Client(transport=httpx.MockTransport(slow)),
     )
-    task = client.videos.get.__self__
     from routerai.resources.videos import VideoTask
 
     video = VideoTask(client._http, {"id": "t1", "status": "processing"})
