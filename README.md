@@ -111,8 +111,21 @@ await task.asave("video.mp4")           # async variant, cancellation-safe
 
 # webhooks: verify HMAC over the raw body with your api key
 from routerai.webhooks import verify_video
+
+# Read the headers case-insensitively — proxies rewrite their case, and the
+# framework's own header mapping already does this for you.
+signature = request.headers["X-RouterAI-Signature"]
+timestamp = request.headers["X-RouterAI-Timestamp"]
 data = verify_video(raw_body, signature, api_key, timestamp, max_age_seconds=300)
 ```
+
+A bad signature raises `WebhookVerificationError`, including when the header
+contains bytes outside ASCII — the handler answers 401 rather than 500.
+
+Starting a generation requires an available balance well above the price of the
+clip (RouterAI holds an amount while the video renders and charges the actual
+cost afterwards), so an underfunded account gets `InsufficientFundsError` before
+anything is generated.
 
 ## Tools, structured output and cost
 

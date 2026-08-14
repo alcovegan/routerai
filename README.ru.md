@@ -115,8 +115,20 @@ await task.asave("video.mp4")           # асинхронный вариант 
 
 # Вебхуки: проверка HMAC по исходному телу запроса с помощью API-ключа
 from routerai.webhooks import verify_video
+
+# Читайте заголовки регистронезависимо: прокси меняют регистр, а штатный
+# доступ к заголовкам во фреймворках это уже учитывает.
+signature = request.headers["X-RouterAI-Signature"]
+timestamp = request.headers["X-RouterAI-Timestamp"]
 data = verify_video(raw_body, signature, api_key, timestamp, max_age_seconds=300)
 ```
+
+Неверная подпись поднимает `WebhookVerificationError` — в том числе когда в
+заголовке пришли байты вне ASCII: обработчик отвечает 401, а не 500.
+
+Запуск генерации требует доступного баланса заметно выше стоимости ролика
+(RouterAI резервирует сумму на время рендера и списывает фактическую), поэтому
+при нехватке средств приходит `InsufficientFundsError` ещё до генерации.
 
 ## Инструменты, структурированный вывод и расходы
 
