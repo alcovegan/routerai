@@ -14,6 +14,11 @@ Python-обёртка для API [RouterAI](https://routerai.ru) — едины�
 - Потоковая передача (SSE) с дельтами в каждом чанке; после открытия успешного потока ответа
   автоматические повторы не выполняются (даже если не был получен ни один чанк), а обрыв
   потока вызывает типизированную ошибку `StreamInterruptedError`
+- Вызовы инструментов в потоке приходят собранными: `StreamAccumulator` склеивает
+  дельты по индексу, поэтому `json.loads(call["function"]["arguments"])` просто работает
+- Типизированные ошибки не спорят сами с собой: любой ответ сервера — наследник
+  `APIStatusError` с `.status_code`, а отказ провайдера, завёрнутый в HTTP 200,
+  всё равно поднимает `RateLimitError`
 - Каталог моделей: получение списка, клиентский поиск и группировка по возможностям (текст,
   рассуждения, зрение, генерация изображений, видео и аудио, синтез и распознавание речи,
   эмбеддинги, реранкинг, инструменты)
@@ -51,6 +56,18 @@ client.models.search("claude", capabilities=["reasoning"], min_context=100_000)
 client.models.by_capability("image")      # модели для генерации изображений
 client.models.grouped()                   # dict[Capability, list[Model]]
 client.models.get("deepseek/deepseek-v4-pro").pricing.per_million("prompt")
+
+# Не всё тарифицируется по токенам: картинки — за изображение, rerank —
+# за поисковую единицу, видео — за секунду. Спрашивайте, за что модель берёт
+# деньги, вместо того чтобы читать нулевую цену токена как «бесплатно».
+pricing = client.models.get("black-forest-labs/flux.2-pro").pricing
+pricing.priced_units()              # {"image_output"}
+pricing.price("image_output")       # Decimal за изображение
+pricing.is_free()                   # False
+
+# Поэтому фильтр по цене пропускает модели с другой единицей тарификации,
+# а не ставит их первыми: они не бесплатны, их цена просто в другой валюте.
+client.models.search(max_price_prompt=1.0)
 client.models.endpoints("anthropic/claude-sonnet-5")  # провайдеры и цены
 ```
 
@@ -116,6 +133,10 @@ await client.aclose()
 в обоих режимах, вызовите оба метода. Внешние транспорты, переданные через
 `http_client`/`async_http_client`, библиотека никогда не закрывает.
 
+Закрытая сторона остаётся закрытой: обращение к ней поднимает
+`RuntimeError("client is closed")`, а не открывает молча новый пул с настройками
+по умолчанию. При этом `close()` не мешает работе асинхронной стороны, и наоборот.
+
 ## Конфигурация
 
 | Параметр | Описание |
@@ -144,20 +165,46 @@ await client.aclose()
 
 ## Ошибки
 
-| Исключение | HTTP/условие |
-| --- | --- |
-| `AuthenticationError` | 401 |
-| `InsufficientFundsError` | 402 |
-| `PermissionDeniedError` | 403 |
-| `NotFoundError` | 404 |
-| `RateLimitError` | 429 |
-| `NoProviderError` | 503 с сообщением «no provider available» |
-| `APIStatusError` | остальные ответы 4xx/5xx (содержит `.status_code`, `.body`) |
-| `RequestError` | транспортная ошибка после исчерпания повторных попыток |
-| `DeadlineExceededError` | превышен абсолютный дедлайн опроса (метод видео `wait()`) |
-| `StreamInterruptedError` | SSE-поток оборвался после открытия потока ответа (`.chunks_received` может быть равен 0) |
-| `VideoGenerationError` | задача генерации видео перешла в состояние `failed`/`cancelled`/`expired` |
-| `WebhookVerificationError` | не пройдена проверка подписи или срока актуальности вебхука видео |
+Всё, чем ответил сервер, — это `APIStatusError` или его наследник, поэтому
+`except APIStatusError` ловит любую такую ошибку, и `.status_code` есть всегда:
+
+```
+RouterAIError
+├─ APIStatusError            .status_code .http_status .provider_code .body
+│  ├─ BadRequestError                400
+│  ├─ AuthenticationError            401
+│  ├─ InsufficientFundsError         402
+│  ├─ PermissionDeniedError          403
+│  ├─ NotFoundError                  404
+│  ├─ ConflictError                  409
+│  ├─ UnprocessableEntityError       422
+│  ├─ RateLimitError                 429
+│  └─ ServerError                    5xx
+│     └─ NoProviderError             ни один провайдер не смог обслужить модель
+├─ RequestError              транспортная ошибка после исчерпания повторов
+│  └─ APIConnectionError     соединение не было установлено
+│     └─ APITimeoutError     истёк таймаут запроса
+├─ ResponseParsingError      тело ответа оказалось не той формы
+├─ DeadlineExceededError     превышен абсолютный дедлайн опроса (видео `wait()`)
+├─ StreamInterruptedError    SSE оборвался после открытия потока (`.chunks_received` может быть 0)
+├─ VideoGenerationError      задача видео перешла в терминальное состояние отказа
+├─ WebhookVerificationError  не пройдена проверка подписи или свежести вебхука
+├─ ConfigurationError        клиент сконфигурирован противоречиво
+└─ ModelNotFoundError        такой модели нет в каталоге
+```
+
+RouterAI сообщает об отказах провайдера внутри успешного HTTP-ответа, пряча
+настоящий код в JSON-строке. SDK её разворачивает, поэтому лимит провайдера
+поднимает `RateLimitError`, хотя транспорт сказал 200:
+
+```python
+try:
+    client.chat.complete(model, prompt)
+except RateLimitError as exc:
+    exc.status_code    # 429 — код, объясняющий отказ
+    exc.http_status    # 200 — что на самом деле сказал транспорт
+    exc.status_source  # "provider"
+```
 
 ## Логирование
 

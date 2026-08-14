@@ -14,6 +14,11 @@ Python wrapper for the [RouterAI](https://routerai.ru) API — unified access to
 - Streaming (SSE) with per-chunk deltas; once a successful response stream is opened
   no automatic retries happen (even if 0 chunks arrived), mid-stream failures raise a
   typed `StreamInterruptedError`
+- Streamed tool calls arrive assembled: `StreamAccumulator` merges the deltas by
+  index, so `json.loads(call["function"]["arguments"])` just works
+- Typed errors that agree with themselves: every server answer is an
+  `APIStatusError` subclass carrying `.status_code`, and a provider failure
+  wrapped in HTTP 200 still raises `RateLimitError`
 - Models catalog: listing, client-side search, grouping by capabilities (text, reasoning,
   vision, image/video/audio generation, speech, transcription, embeddings, rerank, tools)
 - Post-hoc cost lookup by generation id (`X-Generation-Id`)
@@ -47,6 +52,18 @@ client.models.search("claude", capabilities=["reasoning"], min_context=100_000)
 client.models.by_capability("image")      # image generation models
 client.models.grouped()                   # dict[Capability, list[Model]]
 client.models.get("deepseek/deepseek-v4-pro").pricing.per_million("prompt")
+
+# Not every model is billed per token: image models charge per image,
+# rerank per search unit, video per second. Ask what a model charges for
+# instead of reading a zero token price as "free".
+pricing = client.models.get("black-forest-labs/flux.2-pro").pricing
+pricing.priced_units()              # {"image_output"}
+pricing.price("image_output")       # Decimal per image
+pricing.is_free()                   # False
+
+# A price filter therefore skips models billed in another unit rather than
+# ranking them first — they are not free, their price is in another currency.
+client.models.search(max_price_prompt=1.0)
 client.models.endpoints("anthropic/claude-sonnet-5")  # providers + prices
 ```
 
@@ -112,6 +129,10 @@ aclose()` closes the async one. If a single instance was used from both modes,
 call both. External transports injected via `http_client`/`async_http_client`
 are never closed by the library.
 
+A closed side stays closed: calling into it raises `RuntimeError("client is
+closed")` rather than quietly opening a fresh pool with default settings.
+`close()` leaves the async side usable, and vice versa.
+
 ## Configuration
 
 | Option | Description |
@@ -141,20 +162,47 @@ it can never override library-managed keys (`model`, `messages`, `stream`, ...)
 
 ## Errors
 
-| Exception | HTTP |
-| --- | --- |
-| `AuthenticationError` | 401 |
-| `InsufficientFundsError` | 402 |
-| `PermissionDeniedError` | 403 |
-| `NotFoundError` | 404 |
-| `RateLimitError` | 429 |
-| `NoProviderError` | 503 with "no provider available" |
-| `APIStatusError` | other 4xx/5xx (has `.status_code`, `.body`) |
-| `RequestError` | transport failure after retries |
-| `DeadlineExceededError` | an absolute polling deadline passed (video `wait()`) |
-| `StreamInterruptedError` | SSE broke after the response stream was opened (`.chunks_received` may be 0) |
-| `VideoGenerationError` | a video task reached `failed`/`cancelled`/`expired` |
-| `WebhookVerificationError` | video webhook failed signature or freshness checks |
+Everything the server answers with is an `APIStatusError` or one of its
+subclasses, so `except APIStatusError` catches the lot and `.status_code`
+is always there:
+
+```
+RouterAIError
+├─ APIStatusError            .status_code .http_status .provider_code .body
+│  ├─ BadRequestError                400
+│  ├─ AuthenticationError            401
+│  ├─ InsufficientFundsError         402
+│  ├─ PermissionDeniedError          403
+│  ├─ NotFoundError                  404
+│  ├─ ConflictError                  409
+│  ├─ UnprocessableEntityError       422
+│  ├─ RateLimitError                 429
+│  └─ ServerError                    5xx
+│     └─ NoProviderError             no provider could serve the model
+├─ RequestError              transport failure after retries
+│  └─ APIConnectionError     connection never established
+│     └─ APITimeoutError     request timed out
+├─ ResponseParsingError      the body was not the expected shape
+├─ DeadlineExceededError     an absolute polling deadline passed (video `wait()`)
+├─ StreamInterruptedError    SSE broke after the stream opened (`.chunks_received` may be 0)
+├─ VideoGenerationError      a video task reached a terminal failure state
+├─ WebhookVerificationError  webhook signature or freshness check failed
+├─ ConfigurationError        the client was configured inconsistently
+└─ ModelNotFoundError        no such model in the catalog
+```
+
+RouterAI reports upstream failures inside a successful HTTP response, with the
+real code wrapped in a JSON string. The SDK unwraps that, so a provider rate
+limit raises `RateLimitError` even though the transport said 200:
+
+```python
+try:
+    client.chat.complete(model, prompt)
+except RateLimitError as exc:
+    exc.status_code    # 429 — the code that explains the failure
+    exc.http_status    # 200 — what the transport actually said
+    exc.status_source  # "provider"
+```
 
 ## Logging
 
