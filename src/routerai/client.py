@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Mapping
 from typing import Any
 
 import httpx
@@ -46,6 +47,9 @@ class RouterAI:
             unless owned). The same instance may be used for sync and async
             calls; transports are kept in separate slots.
         async_http_client: optional async httpx transport.
+        default_headers: headers added to every request (an application can
+            identify itself, e.g. ``{"X-Title": "my-app"}``).
+        app_info: appended to the SDK User-Agent, e.g. ``"my-app/1.2"``.
 
     Resource namespaces: ``chat``, ``models``, ``completions``, ``responses``,
     ``messages``, ``images``, ``videos``, ``audio``, ``embeddings``,
@@ -66,6 +70,8 @@ class RouterAI:
         models_ttl: float = 600.0,
         http_client: httpx.Client | None = None,
         async_http_client: httpx.AsyncClient | None = None,
+        default_headers: Mapping[str, str] | None = None,
+        app_info: str | None = None,
     ) -> None:
         api_key = api_key if api_key is not None else os.getenv(ENV_API_KEY)
         if api_key is not None and not api_key.strip():
@@ -86,6 +92,8 @@ class RouterAI:
             logger=logger,
             http_client=http_client,
             async_http_client=async_http_client,
+            default_headers=dict(default_headers) if default_headers else None,
+            app_info=app_info,
         )
         self.chat = Chat(self._http)
         self.models = Models(self._http, ttl=models_ttl)

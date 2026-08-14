@@ -1,3 +1,4 @@
+from ._version import __version__
 from .client import RouterAI
 from .errors import (
     APIConnectionError,
@@ -52,14 +53,6 @@ from .schemas import (
     Usage,
 )
 from .webhooks import signing_secret, verify_video
-
-__version__: str
-try:
-    from importlib.metadata import version
-
-    __version__ = version("routerai")
-except Exception:  # pragma: no cover - source checkout without installed metadata
-    __version__ = "0.2.0"
 
 __all__ = [
     "APIConnectionError",

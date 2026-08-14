@@ -393,3 +393,93 @@ def test_cost_formatting_never_loses_a_paid_response():
     )
     assert client.chat.complete("m", "hi").content == "ответ"
     client.close()
+
+
+def test_client_identifies_itself_and_honours_custom_headers():
+    """The server should be able to tell this SDK from a hand-rolled request."""
+    import httpx
+
+    from routerai import RouterAI, __version__
+
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(request.headers)
+        return httpx.Response(
+            200, json={"credits": "1"}, headers={"content-type": "application/json"}
+        )
+
+    client = RouterAI(
+        api_key="sk-cassette",
+        max_retries=0,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        default_headers={"X-Title": "my-app"},
+        app_info="my-app/1.2",
+    )
+    client.account.credits()
+    assert seen["user-agent"].startswith(f"routerai-python/{__version__}")
+    assert seen["user-agent"].endswith("my-app/1.2")
+    assert seen["x-title"] == "my-app"
+    assert seen["authorization"] == "Bearer sk-cassette"
+    client.close()
+
+
+def test_per_call_options_override_the_client():
+    """One slow call should not need a second client."""
+    import httpx
+
+    from routerai import RouterAI
+    from routerai.errors import ConfigurationError, ServerError
+
+    attempts = {"n": 0}
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts["n"] += 1
+        seen["timeout"] = request.extensions.get("timeout")
+        seen["trace"] = request.headers.get("x-trace")
+        return httpx.Response(
+            500, json={"error": "boom"}, headers={"content-type": "application/json"}
+        )
+
+    client = RouterAI(
+        api_key="sk-cassette",
+        max_retries=3,
+        retry_backoff=0.001,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    with pytest.raises(ServerError):
+        client.chat.complete("m", "hi", max_retries=0, timeout=3.5, headers={"x-trace": "42"})
+    assert attempts["n"] == 1  # the client default of 3 retries was overridden
+    assert seen["timeout"] == {"connect": 3.5, "read": 3.5, "write": 3.5, "pool": 3.5}
+    assert seen["trace"] == "42"
+
+    with pytest.raises(ConfigurationError):
+        client.chat.complete("m", "hi", timeout=0)
+    client.close()
+
+
+def test_response_format_reaches_the_stream():
+    """JSON mode with streaming had no way through: no parameter, and extra was reserved."""
+    import httpx
+
+    from routerai import RouterAI
+
+    sent: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.update(json.loads(request.content))
+        return httpx.Response(
+            200, content=b"data: [DONE]\n\n", headers={"content-type": "text/event-stream"}
+        )
+
+    client = RouterAI(
+        api_key="sk-cassette",
+        max_retries=0,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    list(client.chat.stream("m", "hi", response_format={"type": "json_object"}))
+    assert sent["response_format"] == {"type": "json_object"}
+    assert sent["stream"] is True
+    client.close()

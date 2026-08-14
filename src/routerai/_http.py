@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import logging
+import platform
 import random
 import time
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Mapping
 from contextlib import asynccontextmanager, contextmanager
+from dataclasses import dataclass
 from json import loads as _json_loads
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
 import httpx
 
 from ._errors import build_error
+from ._options import RequestOptions
+from ._version import __version__
 from .errors import (
     APIConnectionError,
     APITimeoutError,
@@ -22,8 +26,17 @@ from .errors import (
 )
 from .logging import log_request, mask_key
 
+if TYPE_CHECKING:
+    from typing_extensions import Unpack
+
 DEFAULT_BASE_URL = "https://routerai.ru/api/v1"
 DEFAULT_TIMEOUT = 60.0
+
+# Identify the SDK to the server: without this RouterAI sees "python-httpx"
+# and cannot tell its own client from a hand-rolled request.
+USER_AGENT = (
+    f"routerai-python/{__version__} (python/{platform.python_version()}; httpx/{httpx.__version__})"
+)
 
 # Statuses retried for idempotent (safe) methods.
 RETRYABLE_SAFE_STATUSES = {408, 425, 429, 500, 502, 503, 504}
@@ -53,6 +66,17 @@ def _transport_error(message: str, exc: Exception | None) -> RequestError:
     if isinstance(exc, httpx.ConnectError):
         return APIConnectionError(message)
     return RequestError(message)
+
+
+@dataclass(frozen=True)
+class _Call:
+    """Settings resolved for one request."""
+
+    timeout: float
+    max_retries: int
+    deadline: float | None
+    headers: Mapping[str, str] | None
+    error_in_body: bool
 
 
 class ResponseEnvelope:
@@ -200,6 +224,7 @@ class HTTPClient:
         http_client: httpx.Client | httpx.AsyncClient | None = None,
         async_http_client: httpx.AsyncClient | None = None,
         default_headers: dict[str, str] | None = None,
+        app_info: str | None = None,
     ) -> None:
         if async_http_client is not None and isinstance(http_client, httpx.AsyncClient):
             raise ConfigurationError("pass async transport via async_http_client, not http_client")
@@ -225,10 +250,16 @@ class HTTPClient:
 
             logger = get_logger(logger)
         self._logger = logger
-        self._headers = {
-            "Content-Type": "application/json",
-            **(default_headers or {}),
-        }
+        user_agent = USER_AGENT if app_info is None else f"{USER_AGENT} {app_info}"
+        self._headers = dict(
+            httpx.Headers(
+                {
+                    "Content-Type": "application/json",
+                    "User-Agent": user_agent,
+                    **(default_headers or {}),
+                }
+            )
+        )
         if api_key:
             self._headers["Authorization"] = f"Bearer {api_key}"
 
@@ -244,17 +275,27 @@ class HTTPClient:
         return self._logger
 
     @staticmethod
-    def _validate_config(
-        timeout: float, max_retries: int, retry_backoff: float, max_retry_after: float
-    ) -> None:
+    def _validate_timeout(timeout: float) -> None:
         import math
 
         if not math.isfinite(timeout) or timeout <= 0:
             raise ConfigurationError(f"timeout must be a positive finite number, got {timeout!r}")
+
+    @staticmethod
+    def _validate_max_retries(max_retries: int) -> None:
         if not isinstance(max_retries, int) or isinstance(max_retries, bool) or max_retries < 0:
             raise ConfigurationError(
                 f"max_retries must be a non-negative integer, got {max_retries!r}"
             )
+
+    @classmethod
+    def _validate_config(
+        cls, timeout: float, max_retries: int, retry_backoff: float, max_retry_after: float
+    ) -> None:
+        import math
+
+        cls._validate_timeout(timeout)
+        cls._validate_max_retries(max_retries)
         if not math.isfinite(retry_backoff) or retry_backoff < 0:
             raise ConfigurationError(
                 f"retry_backoff must be a non-negative finite number, got {retry_backoff!r}"
@@ -280,6 +321,31 @@ class HTTPClient:
             self._owns_async = True
         return self._async_client
 
+    def _resolve(self, opts: RequestOptions) -> _Call:
+        """Merge per-call options with the client defaults.
+
+        Reading self._max_retries and self._timeout directly in a dozen places
+        is what made per-call overrides impossible; everything goes through here
+        now.
+        """
+        timeout = opts.get("timeout")
+        if timeout is None:
+            timeout = self._timeout
+        else:
+            self._validate_timeout(timeout)
+        retries = opts.get("max_retries")
+        if retries is None:
+            retries = self._max_retries
+        else:
+            self._validate_max_retries(retries)
+        return _Call(
+            timeout=timeout,
+            max_retries=retries,
+            deadline=opts.get("deadline"),
+            headers=opts.get("headers"),
+            error_in_body=opts.get("error_in_body", True),
+        )
+
     def _build_url(self, path: str) -> str:
         """Join the path to the base url, escaping each segment.
 
@@ -301,14 +367,19 @@ class HTTPClient:
         return f"{self._base_url}/{'/'.join(segments)}"
 
     def _merge_headers(
-        self, headers: dict[str, str] | None, *, content: bytes | None = None
+        self, headers: Mapping[str, str] | None, *, content: bytes | None = None
     ) -> dict[str, str]:
-        merged = dict(self._headers)
+        """Client headers with per-call ones on top.
+
+        httpx.Headers matches case-insensitively, so a caller passing
+        "user-agent" replaces the default instead of sending it twice.
+        """
+        merged = httpx.Headers(self._headers)
         if headers:
             merged.update(headers)
         if content is not None:
-            merged.pop("Content-Type", None)
-        return merged
+            merged.pop("content-type", None)
+        return dict(merged)
 
     # --- retry policy ---
 
@@ -416,18 +487,17 @@ class HTTPClient:
         params: dict[str, Any] | None = None,
         json: Any = None,
         content: bytes | None = None,
-        headers: dict[str, str] | None = None,
-        timeout: float | None = None,
-        deadline: float | None = None,
-        error_in_body: bool = True,
+        **opts: Unpack[RequestOptions],
     ) -> ResponseEnvelope:
         url = self._build_url(path)
-        request_headers = self._merge_headers(headers, content=content)
+        call = self._resolve(opts)
+        request_headers = self._merge_headers(call.headers, content=content)
         client = self._ensure_sync_client()
+        deadline = call.deadline
 
         last_exc: Exception | None = None
-        for attempt in range(self._max_retries + 1):
-            attempt_timeout = self._timeout if timeout is None else timeout
+        for attempt in range(call.max_retries + 1):
+            attempt_timeout = call.timeout
             if deadline is not None:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -446,7 +516,7 @@ class HTTPClient:
                 )
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 last_exc = exc
-                if attempt < self._max_retries and self._should_retry_transport(method, exc):
+                if attempt < call.max_retries and self._should_retry_transport(method, exc):
                     self._logger.warning(
                         "retry %s %s after %s (attempt %d)", method, url, mask_key(exc), attempt + 1
                     )
@@ -461,7 +531,7 @@ class HTTPClient:
             elapsed = time.monotonic() - started
             if (
                 self._should_retry_status(method, response.status_code)
-                and attempt < self._max_retries
+                and attempt < call.max_retries
             ):
                 response.read()
                 response.close()
@@ -480,7 +550,7 @@ class HTTPClient:
                 envelope.status_code,
                 envelope.body,
                 headers=envelope.headers,
-                error_in_body=error_in_body,
+                error_in_body=call.error_in_body,
             )
             return envelope
 
@@ -497,8 +567,7 @@ class HTTPClient:
         params: dict[str, Any] | None = None,
         json: Any = None,
         content: bytes | None = None,
-        headers: dict[str, str] | None = None,
-        timeout: float | None = None,
+        **opts: Unpack[RequestOptions],
     ) -> Iterator[httpx.Response]:
         """Open a streaming response.
 
@@ -507,12 +576,13 @@ class HTTPClient:
         without retry (the request may already be billed).
         """
         url = self._build_url(path)
-        request_headers = self._merge_headers(headers, content=content)
+        call = self._resolve(opts)
+        request_headers = self._merge_headers(call.headers, content=content)
         client = self._ensure_sync_client()
 
         yielded = False
         last_exc: Exception | None = None
-        for attempt in range(self._max_retries + 1):
+        for attempt in range(call.max_retries + 1):
             started = time.monotonic()
             try:
                 with client.stream(
@@ -522,11 +592,11 @@ class HTTPClient:
                     json=json,
                     content=content,
                     headers=request_headers,
-                    timeout=self._timeout if timeout is None else timeout,
+                    timeout=call.timeout,
                 ) as response:
                     if (
                         self._should_retry_status(method, response.status_code)
-                        and attempt < self._max_retries
+                        and attempt < call.max_retries
                     ):
                         response.read()
                         self._logger.warning(
@@ -558,7 +628,7 @@ class HTTPClient:
                 if yielded:
                     raise
                 last_exc = exc
-                if attempt < self._max_retries and self._should_retry_transport(method, exc):
+                if attempt < call.max_retries and self._should_retry_transport(method, exc):
                     self._logger.warning(
                         "retry %s %s after %s (attempt %d)", method, url, mask_key(exc), attempt + 1
                     )
@@ -579,18 +649,17 @@ class HTTPClient:
         params: dict[str, Any] | None = None,
         json: Any = None,
         content: bytes | None = None,
-        headers: dict[str, str] | None = None,
-        timeout: float | None = None,
-        deadline: float | None = None,
-        error_in_body: bool = True,
+        **opts: Unpack[RequestOptions],
     ) -> ResponseEnvelope:
         url = self._build_url(path)
-        request_headers = self._merge_headers(headers, content=content)
+        call = self._resolve(opts)
+        request_headers = self._merge_headers(call.headers, content=content)
         client = self._ensure_async_client()
+        deadline = call.deadline
 
         last_exc: Exception | None = None
-        for attempt in range(self._max_retries + 1):
-            attempt_timeout = self._timeout if timeout is None else timeout
+        for attempt in range(call.max_retries + 1):
+            attempt_timeout = call.timeout
             if deadline is not None:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -620,7 +689,7 @@ class HTTPClient:
                         ) from exc
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 last_exc = exc
-                if attempt < self._max_retries and self._should_retry_transport(method, exc):
+                if attempt < call.max_retries and self._should_retry_transport(method, exc):
                     self._logger.warning(
                         "retry %s %s after %s (attempt %d)", method, url, mask_key(exc), attempt + 1
                     )
@@ -635,7 +704,7 @@ class HTTPClient:
             elapsed = time.monotonic() - started
             if (
                 self._should_retry_status(method, response.status_code)
-                and attempt < self._max_retries
+                and attempt < call.max_retries
             ):
                 await response.aread()
                 await response.aclose()
@@ -654,7 +723,7 @@ class HTTPClient:
                 envelope.status_code,
                 envelope.body,
                 headers=envelope.headers,
-                error_in_body=error_in_body,
+                error_in_body=call.error_in_body,
             )
             return envelope
 
@@ -671,16 +740,16 @@ class HTTPClient:
         params: dict[str, Any] | None = None,
         json: Any = None,
         content: bytes | None = None,
-        headers: dict[str, str] | None = None,
-        timeout: float | None = None,
+        **opts: Unpack[RequestOptions],
     ) -> AsyncIterator[httpx.Response]:
         url = self._build_url(path)
-        request_headers = self._merge_headers(headers, content=content)
+        call = self._resolve(opts)
+        request_headers = self._merge_headers(call.headers, content=content)
         client = self._ensure_async_client()
 
         yielded = False
         last_exc: Exception | None = None
-        for attempt in range(self._max_retries + 1):
+        for attempt in range(call.max_retries + 1):
             started = time.monotonic()
             try:
                 async with client.stream(
@@ -690,11 +759,11 @@ class HTTPClient:
                     json=json,
                     content=content,
                     headers=request_headers,
-                    timeout=self._timeout if timeout is None else timeout,
+                    timeout=call.timeout,
                 ) as response:
                     if (
                         self._should_retry_status(method, response.status_code)
-                        and attempt < self._max_retries
+                        and attempt < call.max_retries
                     ):
                         await response.aread()
                         self._logger.warning(
@@ -729,7 +798,7 @@ class HTTPClient:
                 if yielded:
                     raise
                 last_exc = exc
-                if attempt < self._max_retries and self._should_retry_transport(method, exc):
+                if attempt < call.max_retries and self._should_retry_transport(method, exc):
                     self._logger.warning(
                         "retry %s %s after %s (attempt %d)", method, url, mask_key(exc), attempt + 1
                     )
@@ -748,17 +817,25 @@ class HTTPClient:
             return response.json()
         return dict(response.json())
 
-    def get(self, path: str, **kwargs: Any) -> ResponseEnvelope:
-        return self.request("GET", path, **kwargs)
+    def get(
+        self, path: str, *, params: dict[str, Any] | None = None, **opts: Unpack[RequestOptions]
+    ) -> ResponseEnvelope:
+        return self.request("GET", path, params=params, **opts)
 
-    def post(self, path: str, **kwargs: Any) -> ResponseEnvelope:
-        return self.request("POST", path, **kwargs)
+    def post(
+        self, path: str, *, json: Any = None, **opts: Unpack[RequestOptions]
+    ) -> ResponseEnvelope:
+        return self.request("POST", path, json=json, **opts)
 
-    async def aget(self, path: str, **kwargs: Any) -> ResponseEnvelope:
-        return await self.arequest("GET", path, **kwargs)
+    async def aget(
+        self, path: str, *, params: dict[str, Any] | None = None, **opts: Unpack[RequestOptions]
+    ) -> ResponseEnvelope:
+        return await self.arequest("GET", path, params=params, **opts)
 
-    async def apost(self, path: str, **kwargs: Any) -> ResponseEnvelope:
-        return await self.arequest("POST", path, **kwargs)
+    async def apost(
+        self, path: str, *, json: Any = None, **opts: Unpack[RequestOptions]
+    ) -> ResponseEnvelope:
+        return await self.arequest("POST", path, json=json, **opts)
 
     def close(self) -> None:
         """Close the sync side. Requests after this raise RuntimeError.

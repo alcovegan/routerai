@@ -1,6 +1,6 @@
 [project]
 name = "routerai"
-version = "0.2.0"
+dynamic = ["version"]
 description = "Python wrapper for the RouterAI API — unified access to 400+ AI models with ruble pricing"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -46,6 +46,9 @@ Repository = "https://github.com/alcovegan/routerai"
 Documentation = "https://github.com/alcovegan/routerai#readme"
 Issues = "https://github.com/alcovegan/routerai/issues"
 Changelog = "https://github.com/alcovegan/routerai/blob/main/CHANGELOG.md"
+
+[tool.hatch.version]
+path = "src/routerai/_version.py"
 
 [build-system]
 requires = ["hatchling"]

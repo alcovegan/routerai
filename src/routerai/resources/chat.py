@@ -10,10 +10,13 @@ import httpx
 
 from .._errors import DONE_MARKER, parse_stream_event
 from .._extras import merge_extra as _merge_extra
+from .._options import RequestOptions
 from ..errors import StreamInterruptedError
 from ..schemas import ChatResult, ProviderSelection, ServiceTier, Usage
 
 if TYPE_CHECKING:
+    from typing_extensions import Unpack
+
     from .._http import HTTPClient
 
 MessageInput = dict[str, Any]
@@ -79,6 +82,7 @@ class Chat:
         provider: ProviderSelection | dict[str, Any] | None = None,
         stop: list[str] | None = None,
         extra: dict[str, Any] | None = None,
+        **opts: Unpack[RequestOptions],
     ) -> ChatResult:
         """Send a chat completion request and return a parsed result.
 
@@ -100,7 +104,7 @@ class Chat:
             stop=stop,
             extra=extra,
         )
-        response = self._http.post("chat/completions", json=body)
+        response = self._http.post("chat/completions", json=body, **opts)
         generation_id = response.generation_id
         return ChatResult.from_response(response.json(), generation_id=generation_id)
 
@@ -120,6 +124,7 @@ class Chat:
         provider: ProviderSelection | dict[str, Any] | None = None,
         stop: list[str] | None = None,
         extra: dict[str, Any] | None = None,
+        **opts: Unpack[RequestOptions],
     ) -> ChatResult:
         body = self._build_body(
             model,
@@ -136,7 +141,7 @@ class Chat:
             stop=stop,
             extra=extra,
         )
-        response = await self._http.apost("chat/completions", json=body)
+        response = await self._http.apost("chat/completions", json=body, **opts)
         generation_id = response.generation_id
         return ChatResult.from_response(response.json(), generation_id=generation_id)
 
@@ -198,10 +203,12 @@ class Chat:
         top_p: float | None = None,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: Any = None,
+        response_format: dict[str, Any] | None = None,
         service_tier: ServiceTier | str | None = None,
         provider: ProviderSelection | dict[str, Any] | None = None,
         stop: list[str] | None = None,
         extra: dict[str, Any] | None = None,
+        **opts: Unpack[RequestOptions],
     ) -> Iterator[StreamChunk]:
         body = self._build_body(
             model,
@@ -212,14 +219,14 @@ class Chat:
             top_p=top_p,
             tools=tools,
             tool_choice=tool_choice,
-            response_format=None,
+            response_format=response_format,
             service_tier=service_tier,
             provider=provider,
             stop=stop,
             extra=extra,
         )
         body["stream"] = True
-        with self._http.stream_request("POST", "chat/completions", json=body) as response:
+        with self._http.stream_request("POST", "chat/completions", json=body, **opts) as response:
             yield from _iter_sse(
                 response,
                 http=self._http,
@@ -237,10 +244,12 @@ class Chat:
         top_p: float | None = None,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: Any = None,
+        response_format: dict[str, Any] | None = None,
         service_tier: ServiceTier | str | None = None,
         provider: ProviderSelection | dict[str, Any] | None = None,
         stop: list[str] | None = None,
         extra: dict[str, Any] | None = None,
+        **opts: Unpack[RequestOptions],
     ) -> AsyncIterator[StreamChunk]:
         body = self._build_body(
             model,
@@ -251,14 +260,16 @@ class Chat:
             top_p=top_p,
             tools=tools,
             tool_choice=tool_choice,
-            response_format=None,
+            response_format=response_format,
             service_tier=service_tier,
             provider=provider,
             stop=stop,
             extra=extra,
         )
         body["stream"] = True
-        async with self._http.astream_request("POST", "chat/completions", json=body) as response:
+        async with self._http.astream_request(
+            "POST", "chat/completions", json=body, **opts
+        ) as response:
             async for chunk in _aiter_sse(
                 response,
                 http=self._http,

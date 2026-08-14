@@ -11,10 +11,13 @@ import httpx
 
 from .._errors import DONE_MARKER, parse_stream_event
 from .._extras import merge_extra
+from .._options import RequestOptions
 from ..errors import RequestError, RouterAIError, StreamInterruptedError
 from ..schemas import Usage
 
 if TYPE_CHECKING:
+    from typing_extensions import Unpack
+
     from .._http import HTTPClient
 
 
@@ -154,6 +157,7 @@ class Images:
         seed: int | None = None,
         input_references: list[Any] | None = None,
         extra: dict[str, Any] | None = None,
+        **opts: Unpack[RequestOptions],
     ) -> ImageResult:
         body = self._body(
             model,
@@ -170,7 +174,7 @@ class Images:
             input_references=input_references,
             extra=extra,
         )
-        response = self._http.post("images", json=body)
+        response = self._http.post("images", json=body, **opts)
         return self._parse(response)
 
     async def agenerate(
@@ -189,6 +193,7 @@ class Images:
         seed: int | None = None,
         input_references: list[Any] | None = None,
         extra: dict[str, Any] | None = None,
+        **opts: Unpack[RequestOptions],
     ) -> ImageResult:
         body = self._body(
             model,
@@ -205,7 +210,7 @@ class Images:
             input_references=input_references,
             extra=extra,
         )
-        response = await self._http.apost("images", json=body)
+        response = await self._http.apost("images", json=body, **opts)
         return self._parse(response)
 
     def stream(
@@ -224,6 +229,7 @@ class Images:
         seed: int | None = None,
         input_references: list[Any] | None = None,
         extra: dict[str, Any] | None = None,
+        **opts: Unpack[RequestOptions],
     ) -> Iterator[ImageStreamChunk]:
         """Streaming generation: partial previews then a completed event."""
         body = self._body(
@@ -242,7 +248,7 @@ class Images:
             extra=extra,
         )
         body["stream"] = True
-        with self._http.stream_request("POST", "images", json=body) as response:
+        with self._http.stream_request("POST", "images", json=body, **opts) as response:
             yield from _iter_image_sse(
                 response, http=self._http, generation_id=response.headers.get("X-Generation-Id")
             )
@@ -263,6 +269,7 @@ class Images:
         seed: int | None = None,
         input_references: list[Any] | None = None,
         extra: dict[str, Any] | None = None,
+        **opts: Unpack[RequestOptions],
     ) -> AsyncIterator[ImageStreamChunk]:
         body = self._body(
             model,
@@ -280,7 +287,7 @@ class Images:
             extra=extra,
         )
         body["stream"] = True
-        async with self._http.astream_request("POST", "images", json=body) as response:
+        async with self._http.astream_request("POST", "images", json=body, **opts) as response:
             async for chunk in _aiter_image_sse(
                 response, http=self._http, generation_id=response.headers.get("X-Generation-Id")
             ):

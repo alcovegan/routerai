@@ -3,9 +3,12 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+from .._options import RequestOptions
 from ..schemas import GenerationInfo
 
 if TYPE_CHECKING:
+    from typing_extensions import Unpack
+
     from .._http import HTTPClient
 
 
@@ -20,13 +23,13 @@ class Generation:
     def __init__(self, http: HTTPClient) -> None:
         self._http = http
 
-    def get(self, generation_id: str) -> GenerationInfo:
-        response = self._http.get("generation", params={"id": generation_id})
+    def get(self, generation_id: str, **opts: Unpack[RequestOptions]) -> GenerationInfo:
+        response = self._http.get("generation", params={"id": generation_id}, **opts)
         payload = self._http._json(response)
         return GenerationInfo.model_validate(_unwrap(payload))
 
-    async def aget(self, generation_id: str) -> GenerationInfo:
-        response = await self._http.aget("generation", params={"id": generation_id})
+    async def aget(self, generation_id: str, **opts: Unpack[RequestOptions]) -> GenerationInfo:
+        response = await self._http.aget("generation", params={"id": generation_id}, **opts)
         payload = self._http._json(response)
         return GenerationInfo.model_validate(_unwrap(payload))
 
