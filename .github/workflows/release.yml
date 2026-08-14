@@ -4,9 +4,10 @@ on:
   push:
     tags: ["v*"]
 
+# Least privilege: build and smoke-install only read the repository; the
+# publishing jobs get their extra rights individually.
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 jobs:
   build:
@@ -33,6 +34,8 @@ jobs:
     needs: [build, smoke-install]
     runs-on: ubuntu-latest
     environment: pypi
+    permissions:
+      id-token: write          # trusted publishing
     steps:
       - uses: actions/download-artifact@v8
         with:
@@ -61,10 +64,15 @@ jobs:
           uv pip install --python /tmp/smoke-venv/bin/python dist/*.whl
           /tmp/smoke-venv/bin/python -c "import routerai; print(routerai.__version__)"
           /tmp/smoke-venv/bin/python -c "from routerai import RouterAI, Registry, StreamAccumulator; from routerai.webhooks import verify_video"
+          uv venv --python ${{ matrix.python-version }} /tmp/sdist-venv
+          uv pip install --python /tmp/sdist-venv/bin/python --no-binary routerai dist/*.tar.gz
+          /tmp/sdist-venv/bin/python -c "import routerai; print('sdist', routerai.__version__)"
 
   github-release:
     needs: pypi-publish
     runs-on: ubuntu-latest
+    permissions:
+      contents: write          # creates the GitHub release
     steps:
       - uses: actions/checkout@v7
         with:

@@ -26,14 +26,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Lower bounds are exercised by the "minimums" CI job, so they must be real:
+# pytest-asyncio < 0.23.8 crashes on pytest 8, ruff < 0.16 flags code this repo
+# ships, and pip/pytest below these versions carry known advisories.
 dev = [
-    "pip>=24",
+    "pip>=25.2",
     "pip-audit>=2.7",
-    "pytest>=8.0",
-    "pytest-asyncio>=0.23",
+    "pytest>=8.4",
+    "pytest-asyncio>=0.23.8",
+    "pytest-cov>=5.0",
     "pytest-socket>=0.6",
     "respx>=0.21",
-    "ruff>=0.6",
+    "ruff>=0.16",
     "mypy>=1.10",
 ]
 
@@ -51,7 +55,17 @@ build-backend = "hatchling.build"
 packages = ["src/routerai"]
 
 [tool.hatch.build.targets.sdist]
-exclude = ["codex-review*.md", ".github/"]
+# Allowlist, not denylist: a denylist ships whatever happens to sit in the
+# working tree at build time.
+include = [
+    "src",
+    "tests",
+    "README.md",
+    "README.ru.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "pyproject.toml",
+]
 
 [tool.ruff]
 line-length = 100
@@ -61,6 +75,12 @@ target-version = "py310"
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 ignore = ["E501"]
 
+[tool.ruff.lint.per-file-ignores]
+# Кассеты и тесты вокруг них описаны по-русски: RUF001/RUF002 принимают
+# кириллицу рядом с латинскими идентификаторами за опечатку.
+"tests/test_cassettes.py" = ["RUF001", "RUF002"]
+"tests/cassettes/__init__.py" = ["RUF002"]
+
 [tool.mypy]
 python_version = "3.10"
 strict = true
@@ -69,6 +89,14 @@ plugins = ["pydantic.mypy"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# xfail_strict turns the xfail markers in test_cassettes.py into a to-do list:
+# fixing a defect makes its test XPASS, which fails the run until the marker goes.
+xfail_strict = true
+filterwarnings = [
+    "error",
+    # pytest-socket raises SocketBlockedError through a UserWarning
+    "ignore::UserWarning",
+]
 markers = [
     "live: run against the real RouterAI API (requires ROUTERAI_API_KEY env var)",
 ]

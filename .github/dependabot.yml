@@ -4,7 +4,17 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-  - package-ecosystem: "pip"
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # "uv", not "pip": CI runs `uv sync --locked`, and the pip ecosystem edits
+  # pyproject.toml without regenerating uv.lock, which makes every such pull
+  # request fail on the lockfile check.
+  - package-ecosystem: "uv"
     directory: "/"
     schedule:
       interval: "weekly"
+    groups:
+      dev-dependencies:
+        dependency-type: "development"

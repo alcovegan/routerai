@@ -5,10 +5,20 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      # Without this one failing interpreter cancels the rest of the matrix,
+      # which is exactly how version-specific breakage stays hidden.
+      fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
@@ -20,5 +30,32 @@ jobs:
       - run: uv run ruff check src tests
       - run: uv run ruff format --check src tests
       - run: uv run mypy src
-      - run: uv run pytest -q -m "not live"
+      - run: uv run pytest -q -m "not live" --cov=routerai --cov-report=term-missing --cov-fail-under=80
       - run: uv run pip-audit --local
+
+  minimums:
+    # The declared lower bounds are only real if something installs them.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.10"
+      # --refresh so a warm uv cache cannot quietly resolve newer versions
+      - run: uv sync --resolution lowest-direct --extra dev --refresh
+      - run: uv run pytest -q -m "not live"
+
+  package:
+    # Build failures should surface on a pull request, not on a release tag.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+      - run: uv build
+      - run: uvx twine check --strict dist/*
+      - name: Ensure the sdist carries no stray files
+        run: |
+          tar -tzf dist/*.tar.gz | sed 's|^[^/]*/||' | sort > /tmp/sdist-files
+          if grep -qE '^(codex-review|\.DS_Store|AGENTS\.md|uv\.lock)' /tmp/sdist-files; then
+            echo "unexpected files in sdist:" && cat /tmp/sdist-files && exit 1
+          fi
