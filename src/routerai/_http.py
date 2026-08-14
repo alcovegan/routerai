@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import random
 import time
@@ -11,18 +10,14 @@ from typing import Any
 
 import httpx
 
+from ._errors import build_error
 from .errors import (
-    APIStatusError,
-    AuthenticationError,
+    APIConnectionError,
+    APITimeoutError,
     ConfigurationError,
     DeadlineExceededError,
-    InsufficientFundsError,
-    NoProviderError,
-    NotFoundError,
-    PermissionDeniedError,
-    RateLimitError,
     RequestError,
-    RouterAIError,
+    ResponseParsingError,
 )
 from .logging import log_request, mask_key
 
@@ -36,49 +31,27 @@ RETRYABLE_SAFE_STATUSES = {408, 425, 429, 500, 502, 503, 504}
 RETRYABLE_UNSAFE_STATUSES = {429}
 SAFE_METHODS = {"GET", "HEAD"}
 
-_STATUS_TO_ERROR: dict[int, type[RouterAIError]] = {
-    401: AuthenticationError,
-    402: InsufficientFundsError,
-    403: PermissionDeniedError,
-    404: NotFoundError,
-    429: RateLimitError,
-}
+
+def _raise_for_status(
+    status: int,
+    body: Any,
+    *,
+    headers: Any = None,
+    error_in_body: bool = True,
+) -> None:
+    """Raise the typed error this response describes, if it describes one."""
+    error = build_error(http_status=status, body=body, headers=headers, error_in_body=error_in_body)
+    if error is not None:
+        raise error
 
 
-def _parse_error_payload(payload: Any) -> str:
-    error = payload.get("error") if isinstance(payload, dict) else None
-    if isinstance(error, dict) and error.get("message"):
-        return str(error["message"])
-    if isinstance(error, str) and error:
-        return error
-    return ""
-
-
-def _error_message_from_body(status: int, body: Any) -> str:
-    """Extract the error message from an already decoded body, or ''.
-
-    For HTTP 200 responses only JSON error payloads count — plain-text or
-    binary 200 bodies (e.g. TTS audio) are not errors.
-    """
-    message = _parse_error_payload(body)
-    if not message and isinstance(body, str) and status >= 400:
-        message = body.strip()
-    return message
-
-
-def _raise_for_status(status: int, message: str, body: Any) -> None:
-    if status < 400:
-        # RouterAI sometimes wraps provider errors in an HTTP 200 body
-        if message:
-            raise APIStatusError(message, status, body)
-        return
-    text = message or f"HTTP {status}"
-    if status == 503 and "provider" in text.lower() and "available" in text.lower():
-        raise NoProviderError(text)
-    error_cls = _STATUS_TO_ERROR.get(status, APIStatusError)
-    if error_cls is APIStatusError:
-        raise APIStatusError(text, status, body)
-    raise error_cls(text)
+def _transport_error(message: str, exc: Exception | None) -> RequestError:
+    """Distinguish a timeout from a connection failure — they need different fixes."""
+    if isinstance(exc, httpx.TimeoutException):
+        return APITimeoutError(message)
+    if isinstance(exc, httpx.ConnectError):
+        return APIConnectionError(message)
+    return RequestError(message)
 
 
 class ResponseEnvelope:
@@ -100,19 +73,22 @@ class ResponseEnvelope:
         self.request_id = response.headers.get("X-Request-Id") or response.headers.get("Request-Id")
         content_type = response.headers.get("content-type", "").lower()
         if "json" in content_type and response.status_code != 204:
+            # Decode, but do not force the result into a dict: a JSON array of
+            # two-key objects would be read as key/value pairs and turn into a
+            # dictionary that never existed in the response.
             try:
-                self._body = dict(response.json())
+                self._body = response.json()
                 self._is_json = True
             except ValueError:
                 pass
 
     @property
     def body(self) -> Any:
-        """The decoded body (dict for JSON responses, bytes otherwise)."""
+        """The decoded body (mapping for JSON objects, bytes otherwise)."""
         if self._body is None:
             if self._is_json:
                 try:
-                    self._body = dict(self._response.json())
+                    self._body = self._response.json()
                 except ValueError:
                     self._is_json = False
                     self._body = self._response.content
@@ -121,10 +97,20 @@ class ResponseEnvelope:
         return self._body
 
     def json(self) -> dict[str, Any]:
+        """The body as a JSON object.
+
+        An empty body — which is what a 204 on DELETE looks like — reads as an
+        empty object rather than an error, so deleting a key does not fail
+        after the server already deleted it.
+        """
+        if self.status_code == 204:
+            return {}
         body = self.body
-        if not isinstance(body, dict):
-            raise ValueError("response is not a JSON object")
-        return dict(body)
+        if isinstance(body, dict):
+            return dict(body)
+        if body in (None, b"", ""):
+            return {}
+        raise ResponseParsingError(f"expected a JSON object, got {type(body).__name__}", body=body)
 
     @property
     def content(self) -> bytes:
@@ -148,29 +134,16 @@ class ResponseEnvelope:
         return getattr(self._response, name)
 
 
-def _error_message_for_stream(response: httpx.Response) -> str:
-    """Error message for streamed responses (reads the body once)."""
-    if (
-        response.status_code < 400
-        and "json" not in response.headers.get("content-type", "").lower()
-    ):
-        return ""
+def _stream_body(response: httpx.Response) -> Any:
+    """Decoded body of a streamed response, for error mapping."""
     try:
-        body = response.text
+        text = response.text
     except httpx.ResponseNotRead:
-        body = response.read().decode("utf-8", errors="replace")
-    message = _parse_error_payload(json.loads(body)) if _looks_json(body) else ""
-    if not message and response.status_code >= 400:
-        message = body.strip()
-    return message
-
-
-def _looks_json(body: str) -> bool:
+        text = response.read().decode("utf-8", errors="replace")
     try:
-        json.loads(body)
+        return _json_loads(text)
     except ValueError:
-        return False
-    return True
+        return text
 
 
 def _retry_after_seconds(response: httpx.Response, *, max_retry_after: float) -> float | None:
@@ -422,6 +395,7 @@ class HTTPClient:
         headers: dict[str, str] | None = None,
         timeout: float | None = None,
         deadline: float | None = None,
+        error_in_body: bool = True,
     ) -> ResponseEnvelope:
         url = self._build_url(path)
         request_headers = self._merge_headers(headers, content=content)
@@ -480,12 +454,15 @@ class HTTPClient:
             self._log_result(envelope, method, url, elapsed)
             _raise_for_status(
                 envelope.status_code,
-                _error_message_from_body(envelope.status_code, envelope.body),
                 envelope.body,
+                headers=envelope.headers,
+                error_in_body=error_in_body,
             )
             return envelope
 
-        raise RequestError(f"{method} {url} failed: {mask_key(last_exc)}")
+        raise _transport_error(
+            f"{method} {url} failed: {mask_key(last_exc)}", last_exc
+        ) from last_exc
 
     @contextmanager
     def stream_request(
@@ -545,13 +522,11 @@ class HTTPClient:
                         status=response.status_code,
                     )
                     if response.status_code >= 400:
-                        message = _error_message_for_stream(response)
-                        body: Any = None
-                        try:
-                            body = _json_loads(response.text)
-                        except ValueError:
-                            body = response.text
-                        _raise_for_status(response.status_code, message, body)
+                        _raise_for_status(
+                            response.status_code,
+                            _stream_body(response),
+                            headers=response.headers,
+                        )
                     yielded = True
                     yield response
                     return
@@ -566,7 +541,9 @@ class HTTPClient:
                     self._wait(attempt)
                     continue
                 break
-        raise RequestError(f"{method} {url} failed: {mask_key(last_exc)}")
+        raise _transport_error(
+            f"{method} {url} failed: {mask_key(last_exc)}", last_exc
+        ) from last_exc
 
     # --- async ---
 
@@ -581,6 +558,7 @@ class HTTPClient:
         headers: dict[str, str] | None = None,
         timeout: float | None = None,
         deadline: float | None = None,
+        error_in_body: bool = True,
     ) -> ResponseEnvelope:
         url = self._build_url(path)
         request_headers = self._merge_headers(headers, content=content)
@@ -650,12 +628,15 @@ class HTTPClient:
             self._log_result(envelope, method, url, elapsed)
             _raise_for_status(
                 envelope.status_code,
-                _error_message_from_body(envelope.status_code, envelope.body),
                 envelope.body,
+                headers=envelope.headers,
+                error_in_body=error_in_body,
             )
             return envelope
 
-        raise RequestError(f"{method} {url} failed: {mask_key(last_exc)}")
+        raise _transport_error(
+            f"{method} {url} failed: {mask_key(last_exc)}", last_exc
+        ) from last_exc
 
     @asynccontextmanager
     async def astream_request(
@@ -712,13 +693,11 @@ class HTTPClient:
                         # read the (async) body before mapping so the sync
                         # text/json accessors work on unread streams too
                         await response.aread()
-                        message = _error_message_for_stream(response)
-                        body: Any = None
-                        try:
-                            body = _json_loads(response.text)
-                        except ValueError:
-                            body = response.text
-                        _raise_for_status(response.status_code, message, body)
+                        _raise_for_status(
+                            response.status_code,
+                            _stream_body(response),
+                            headers=response.headers,
+                        )
                     yielded = True
                     yield response
                     return
@@ -733,7 +712,9 @@ class HTTPClient:
                     await self._await(attempt)
                     continue
                 break
-        raise RequestError(f"{method} {url} failed: {mask_key(last_exc)}")
+        raise _transport_error(
+            f"{method} {url} failed: {mask_key(last_exc)}", last_exc
+        ) from last_exc
 
     # --- helpers ---
 

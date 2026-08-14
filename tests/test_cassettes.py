@@ -157,21 +157,15 @@ def test_provider_rate_limit_maps_to_rate_limit_error():
         list(client.chat.stream("inclusionai/ling-2.6-flash", "привет"))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="находка L1: настоящий код 400 закопан в строке, наружу идёт status_code=200",
-)
 def test_validation_error_inside_200_keeps_real_status_code():
     client = cassette_client("chat_error_in_200")
     with pytest.raises(APIStatusError) as excinfo:
         client.chat.complete("inclusionai/ling-2.6-flash", "hi", max_tokens=-5)
     assert excinfo.value.status_code == 400
+    assert excinfo.value.http_status == 200
+    assert excinfo.value.status_source == "provider"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="находка L1: HTTP 503 при настоящем коде 429 не распознаётся как лимит",
-)
 def test_embeddings_rate_limit_maps_to_rate_limit_error():
     client = cassette_client("embeddings_rate_limited")
     with pytest.raises(RateLimitError):
@@ -218,20 +212,12 @@ def test_price_filter_excludes_models_priced_in_other_units():
     assert "black-forest-labs/flux.2-pro" not in {m.id for m in cheap}
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="находка 05: статусные ошибки не наследуют APIStatusError",
-)
 def test_authentication_error_is_an_api_status_error():
     client = cassette_client("auth_401")
     with pytest.raises(APIStatusError):
         client.keys.list()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="находка 22: типизированные ошибки не несут статуса и тела ответа",
-)
 def test_typed_errors_carry_status_and_body():
     client = cassette_client("auth_401")
     with pytest.raises(AuthenticationError) as excinfo:

@@ -106,14 +106,21 @@ class VideoTask:
         return self._usage.cost_rub if self._usage else None
 
     def refresh(self, *, timeout: float | None = None, deadline: float | None = None) -> VideoTask:
-        response = self._http.get(f"videos/{self.id}", timeout=timeout, deadline=deadline)
+        # error_in_body=False: for a video task ``error`` describes why the
+        # generation failed, which is a state to report through
+        # VideoGenerationError — not a failure of this HTTP call.
+        response = self._http.get(
+            f"videos/{self.id}", timeout=timeout, deadline=deadline, error_in_body=False
+        )
         self._apply(self._http._json(response))
         return self
 
     async def arefresh(
         self, *, timeout: float | None = None, deadline: float | None = None
     ) -> VideoTask:
-        response = await self._http.aget(f"videos/{self.id}", timeout=timeout, deadline=deadline)
+        response = await self._http.aget(
+            f"videos/{self.id}", timeout=timeout, deadline=deadline, error_in_body=False
+        )
         self._apply(self._http._json(response))
         return self
 
@@ -341,11 +348,11 @@ class Videos:
         return VideoTask(self._http, self._http._json(response))
 
     def get(self, task_id: str) -> VideoTask:
-        response = self._http.get(f"videos/{task_id}")
+        response = self._http.get(f"videos/{task_id}", error_in_body=False)
         return VideoTask(self._http, self._http._json(response))
 
     async def aget(self, task_id: str) -> VideoTask:
-        response = await self._http.aget(f"videos/{task_id}")
+        response = await self._http.aget(f"videos/{task_id}", error_in_body=False)
         return VideoTask(self._http, self._http._json(response))
 
     def _body(

@@ -19,6 +19,7 @@ from routerai.errors import (
     RequestError,
     RouterAIError,
     StreamInterruptedError,
+    VideoGenerationError,
     WebhookVerificationError,
 )
 
@@ -426,6 +427,12 @@ def test_request_body_is_valid_json():
 
 
 def test_http_200_with_error_payload_raises(respx_mock):
+    """The code that explains the failure wins over the transport status.
+
+    RouterAI answers 200 and hides the real code inside a JSON string, so
+    ``status_code`` reports that code — otherwise the exception type and the
+    status would disagree. The transport status stays available separately.
+    """
     payload = {"error": '{"error":{"message":"Provider returned error","code":400}}'}
     respx_mock.post("https://routerai.ru/api/v1/chat/completions").mock(
         return_value=httpx_response(payload, status_code=200)
@@ -433,8 +440,31 @@ def test_http_200_with_error_payload_raises(respx_mock):
     client = RouterAI(api_key="sk-test", max_retries=0)
     with pytest.raises(APIStatusError) as exc_info:
         client.chat.complete("m", "x")
-    assert exc_info.value.status_code == 200
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.http_status == 200
+    assert exc_info.value.provider_code == 400
+    assert exc_info.value.status_source == "provider"
     assert exc_info.value.body == payload
+    client.close()
+
+
+def test_failed_video_task_is_reachable(respx_mock):
+    """A failed generation is a task state, not a failed HTTP call.
+
+    The polling endpoint answers 200 and puts the reason in ``error``; treating
+    that as a request failure made VideoGenerationError unreachable whenever
+    the server bothered to explain itself.
+    """
+    payload = {"id": "vid-1", "status": "failed", "error": "content policy"}
+    respx_mock.get("https://routerai.ru/api/v1/videos/vid-1").mock(
+        return_value=httpx_response(payload)
+    )
+    client = RouterAI(api_key="sk-test", max_retries=0)
+    task = client.videos.get("vid-1")
+    assert task.failed
+    assert task.error == "content policy"
+    with pytest.raises(VideoGenerationError):
+        task.wait(timeout=1, interval=0.01, raise_on_failure=True)
     client.close()
 
 
