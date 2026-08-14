@@ -59,6 +59,7 @@ from .schemas import (
     ToolCall,
     Usage,
 )
+from .tools import ToolRun, ToolRunResult, tool_schema
 from .usage import UsageRecord, UsageStats, UsageTracker
 from .webhooks import signing_secret, verify_video
 
@@ -118,6 +119,8 @@ __all__ = [
     "TeamInvitation",
     "TeamMember",
     "ToolCall",
+    "ToolRun",
+    "ToolRunResult",
     "TranscriptionResult",
     "UnprocessableEntityError",
     "Usage",
@@ -129,5 +132,6 @@ __all__ = [
     "WebhookVerificationError",
     "__version__",
     "signing_secret",
+    "tool_schema",
     "verify_video",
 ]

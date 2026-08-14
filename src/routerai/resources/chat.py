@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import base64
 import binascii
+import inspect
 import json
-from collections.abc import AsyncIterator, Iterator, Sequence
+from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
@@ -13,8 +14,17 @@ from pydantic import BaseModel, ValidationError
 from .._errors import DONE_MARKER, parse_stream_event
 from .._extras import merge_extra as _merge_extra
 from .._options import RequestOptions
-from ..errors import ResponseParsingError, StreamInterruptedError
-from ..schemas import ChatResult, ProviderSelection, ServiceTier, Usage
+from ..errors import ResponseParsingError, RouterAIError, StreamInterruptedError
+from ..schemas import ChatResult, ProviderSelection, ServiceTier, ToolCall, Usage
+from ..tools import (
+    ToolFunction,
+    ToolRun,
+    ToolRunResult,
+    assistant_message,
+    normalize_tools,
+    parse_arguments,
+    tool_message,
+)
 
 if TYPE_CHECKING:
     from typing_extensions import Unpack
@@ -245,6 +255,89 @@ class Chat:
         )
         return ParsedResult(result, _validate_parsed(result, response_model))
 
+    def run_tools(
+        self,
+        model: str,
+        prompt: str | Sequence[MessageInput],
+        *,
+        tools: Sequence[ToolFunction | dict[str, Any]] | Mapping[str, ToolFunction],
+        system: str | None = None,
+        max_turns: int = 5,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        extra: dict[str, Any] | None = None,
+        **opts: Unpack[RequestOptions],
+    ) -> ToolRunResult:
+        """Answer the prompt, running any tools the model asks for.
+
+        Loops model → function → model until the model stops asking, or until
+        ``max_turns`` is reached; the last result is returned either way, so a
+        model stuck in a loop costs a bounded amount of money.
+        """
+        schemas, registry = normalize_tools(tools)
+        messages = _messages(prompt, system)
+        runs: list[ToolRun] = []
+
+        for turn in range(1, max_turns + 1):
+            result = self.complete(
+                model,
+                messages,
+                tools=schemas,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                extra=extra,
+                **opts,
+            )
+            if not result.tool_calls:
+                return ToolRunResult(result, runs, messages, turn)
+            messages.append(assistant_message(result))
+            for call in result.tool_calls:
+                run = _execute(call, registry)
+                runs.append(run)
+                messages.append(
+                    tool_message(call.id, run.name, run.error if run.error else run.result)
+                )
+        return ToolRunResult(result, runs, messages, max_turns)
+
+    async def arun_tools(
+        self,
+        model: str,
+        prompt: str | Sequence[MessageInput],
+        *,
+        tools: Sequence[ToolFunction | dict[str, Any]] | Mapping[str, ToolFunction],
+        system: str | None = None,
+        max_turns: int = 5,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        extra: dict[str, Any] | None = None,
+        **opts: Unpack[RequestOptions],
+    ) -> ToolRunResult:
+        """Async :meth:`run_tools`; async tool functions are awaited."""
+        schemas, registry = normalize_tools(tools)
+        messages = _messages(prompt, system)
+        runs: list[ToolRun] = []
+
+        for turn in range(1, max_turns + 1):
+            result = await self.acomplete(
+                model,
+                messages,
+                tools=schemas,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                extra=extra,
+                **opts,
+            )
+            if not result.tool_calls:
+                return ToolRunResult(result, runs, messages, turn)
+            messages.append(assistant_message(result))
+            for call in result.tool_calls:
+                run = await _aexecute(call, registry)
+                runs.append(run)
+                messages.append(
+                    tool_message(call.id, run.name, run.error if run.error else run.result)
+                )
+        return ToolRunResult(result, runs, messages, max_turns)
+
     # --- streaming ---
 
     def stream(
@@ -396,6 +489,32 @@ def _validate_parsed(result: ChatResult, response_model: type[ParsedT]) -> Parse
         raise ResponseParsingError(
             f"model output does not match {response_model.__name__}: {exc}", body=payload
         ) from exc
+
+
+def _execute(call: ToolCall, registry: dict[str, ToolFunction]) -> ToolRun:
+    name = call.name or ""
+    function = registry.get(name)
+    if function is None:
+        return ToolRun(name, {}, None, error=f"no tool named {name!r} was provided")
+    try:
+        arguments = parse_arguments(call.arguments)
+    except RouterAIError as exc:
+        return ToolRun(name, {}, None, error=str(exc))
+    try:
+        return ToolRun(name, arguments, function(**arguments))
+    except Exception as exc:
+        # A failing tool is information for the model, not a crash for the caller.
+        return ToolRun(name, arguments, None, error=f"{type(exc).__name__}: {exc}")
+
+
+async def _aexecute(call: ToolCall, registry: dict[str, ToolFunction]) -> ToolRun:
+    run = _execute(call, registry)
+    if inspect.isawaitable(run.result):
+        try:
+            run.result = await run.result
+        except Exception as exc:
+            run.result, run.error = None, f"{type(exc).__name__}: {exc}"
+    return run
 
 
 class ChatStream:

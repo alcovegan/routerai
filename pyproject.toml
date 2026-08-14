@@ -83,6 +83,7 @@ ignore = ["E501"]
 # кириллицу рядом с латинскими идентификаторами за опечатку.
 "tests/test_cassettes.py" = ["RUF001", "RUF002"]
 "tests/test_usage.py" = ["RUF001", "RUF002"]
+"tests/test_tools.py" = ["RUF001", "RUF002"]
 "tests/cassettes/__init__.py" = ["RUF002"]
 
 [tool.mypy]
