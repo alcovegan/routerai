@@ -118,6 +118,55 @@ from routerai.webhooks import verify_video
 data = verify_video(raw_body, signature, api_key, timestamp, max_age_seconds=300)
 ```
 
+## Инструменты, структурированный вывод и расходы
+
+Модель просит функцию — SDK её вызывает и спрашивает снова. Схема берётся из
+сигнатуры, поэтому описание для модели и реально вызываемый код не разъезжаются:
+
+```python
+def get_weather(city: str) -> str:
+    """Узнать погоду в городе."""
+    return f"в городе {city} +17"
+
+answer = client.chat.run_tools(model, "Погода в Москве?", tools=[get_weather])
+answer.content          # итоговый ответ
+answer.runs             # что было выполнено, с аргументами и результатами
+```
+
+Упавший инструмент возвращается модели как результат, а не рушит вызов;
+`max_turns` (по умолчанию 5) ограничивает траты, если модель зациклилась.
+
+Структурированные ответы проверяются вашей же моделью:
+
+```python
+class City(BaseModel):
+    name: str
+    population: int
+
+answer = client.chat.parse(model, "Столица России?", response_model=City)
+answer.parsed.population
+```
+
+Стоимость каждого запроса приходит в рублях, и SDK её суммирует:
+
+```python
+with client.track("ingest") as spent:
+    client.chat.complete(model, prompt)
+print(spent.cost_rub, spent.total_tokens)
+
+client.usage.snapshot().by_model        # итоги по моделям
+client.on_usage(lambda record: metrics.observe(record))
+```
+
+Опции задаются на вызов, а не только на клиент, а модель можно выбрать
+по цене:
+
+```python
+client.chat.complete(model, prompt, timeout=600, max_retries=0)
+client.models.cheapest(capabilities=["tools"], min_context=100_000)
+await client.models.asearch(q="claude")     # асинхронный близнец, цикл не блокируется
+```
+
 ## Асинхронный режим
 
 ```python
@@ -148,6 +197,11 @@ await client.aclose()
 | `max_retry_after` | Верхний предел значения заголовка `Retry-After` в секундах (по умолчанию 60) |
 | `retry_unsafe_methods` | Повторять POST/PATCH/DELETE и при ответах 5xx (по умолчанию False; RouterAI уже выполняет переключение между провайдерами, а клиентский повтор POST может запустить новую платную генерацию) |
 | `http_client` / `async_http_client` | Внешние транспорты httpx (библиотека никогда их не закрывает) |
+| `default_headers` | заголовки, добавляемые к каждому запросу (например, `{"X-Title": "my-app"}`) |
+| `app_info` | добавка к User-Agent SDK, например `"my-app/1.2"` |
+
+Любой вызов дополнительно принимает `timeout`, `max_retries` и `headers`
+для одного этого запроса — они перекрывают клиентские настройки.
 
 Повторные попытки учитывают заголовок `Retry-After`. Безопасные методы (GET/HEAD)
 повторяются при ответах 429/5xx; небезопасные методы по умолчанию — только при 429.

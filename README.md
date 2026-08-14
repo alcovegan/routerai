@@ -114,6 +114,56 @@ from routerai.webhooks import verify_video
 data = verify_video(raw_body, signature, api_key, timestamp, max_age_seconds=300)
 ```
 
+## Tools, structured output and cost
+
+The model asks for a function, the SDK runs it and asks again — the schema is
+derived from the signature, so what the model is told and what runs cannot
+drift apart:
+
+```python
+def get_weather(city: str) -> str:
+    """Узнать погоду в городе."""
+    return f"в городе {city} +17"
+
+answer = client.chat.run_tools(model, "Погода в Москве?", tools=[get_weather])
+answer.content          # final reply
+answer.runs             # what was executed, with arguments and results
+```
+
+A tool that raises is reported back to the model rather than crashing the
+caller, and `max_turns` (5 by default) bounds what a looping model can spend.
+
+Structured answers validate against your own model:
+
+```python
+class City(BaseModel):
+    name: str
+    population: int
+
+answer = client.chat.parse(model, "Столица России?", response_model=City)
+answer.parsed.population
+```
+
+Every request is priced in rubles, and the SDK adds it up:
+
+```python
+with client.track("ingest") as spent:
+    client.chat.complete(model, prompt)
+print(spent.cost_rub, spent.total_tokens)
+
+client.usage.snapshot().by_model        # totals per model
+client.on_usage(lambda record: metrics.observe(record))
+```
+
+Options can be set per call instead of per client, and the catalog can pick a
+model for you:
+
+```python
+client.chat.complete(model, prompt, timeout=600, max_retries=0)
+client.models.cheapest(capabilities=["tools"], min_context=100_000)
+await client.models.asearch(q="claude")     # async twin, no blocked event loop
+```
+
 ## Async
 
 ```python
@@ -145,6 +195,11 @@ closed")` rather than quietly opening a fresh pool with default settings.
 | `retry_unsafe_methods` | retry POST/PATCH/DELETE on 5xx too (default False; RouterAI already
   does provider fallback, a client-side POST retry may start a new billed generation) |
 | `http_client` / `async_http_client` | inject external httpx transports (never closed by the library) |
+| `default_headers` | headers added to every request (e.g. `{"X-Title": "my-app"}`) |
+| `app_info` | appended to the SDK User-Agent, e.g. `"my-app/1.2"` |
+
+Any call also accepts `timeout`, `max_retries` and `headers` for that one
+request; they override the client-wide settings.
 
 Retries honour the `Retry-After` header. Safe methods (GET/HEAD) are retried on
 429/5xx; unsafe methods only on 429 by default.

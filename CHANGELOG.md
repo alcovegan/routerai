@@ -6,6 +6,38 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-14
+
+### Added
+
+- `client.chat.run_tools(model, prompt, tools=[fn])` runs the loop of model →
+  function → model. Schemas are derived from the signature; a tool that raises
+  is reported back to the model instead of crashing the caller; `max_turns`
+  bounds what a looping model can spend.
+- `client.chat.parse(..., response_model=Model)` asks for a JSON schema derived
+  from a pydantic model and validates the answer against the same model.
+- Cost accounting: `client.usage` keeps running totals by model and by label,
+  `client.track("label")` scopes them to a block, `client.on_usage(hook)`
+  reports every request. Streamed usage is collected too, and accounting no
+  longer depends on the log level.
+- Per-call options: `timeout`, `max_retries` and `headers` can be passed to any
+  method for that one request.
+- `default_headers` and `app_info` on `RouterAI(...)`, and a `User-Agent` of
+  `routerai-python/<version>`.
+- `response_format` works with `stream()`, which was previously unreachable.
+- Async catalog: `asearch`, `agrouped`, `aby_capability`, and
+  `models.cheapest()`/`acheapest()` for picking a model by price.
+- `stream()`/`astream()` return a wrapper that also works as a context manager,
+  so an abandoned async stream releases its connection immediately instead of
+  waiting for the loop to shut down its async generators.
+
+### Changed
+
+- Opening a stream is logged at DEBUG; the INFO line is written when the stream
+  finishes, and now carries the tokens and cost from its final chunk.
+- The package version lives in `routerai/_version.py`; hatch reads it from
+  there, so it is no longer duplicated in `pyproject.toml`.
+
 ## [0.2.0] - 2026-08-14
 
 Everything below was found by auditing the SDK against the live API and is
