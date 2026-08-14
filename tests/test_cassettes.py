@@ -128,10 +128,6 @@ def test_generation_info_unwraps_data_envelope():
 # ------------------------------------------------------------------ дефекты
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="находка 01: StreamAccumulator не склеивает дельты tool_calls по index",
-)
 def test_stream_accumulator_merges_tool_call_deltas():
     """Сервер шлёт вызов инструмента по частям — собрать его должен аккумулятор."""
     client = cassette_client("chat_stream_tool_calls")
@@ -145,11 +141,6 @@ def test_stream_accumulator_merges_tool_call_deltas():
     assert json.loads(call["function"]["arguments"]) == {"city": "Moscow"}
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="находка L1: код ошибки провайдера закопан в строковом поле error, "
-    "поэтому 429 приходит как APIStatusError(502)",
-)
 def test_provider_rate_limit_maps_to_rate_limit_error():
     """Лимит провайдера приходит внутри HTTP 200 и должен стать RateLimitError."""
     client = cassette_client("chat_stream_provider_error")
@@ -185,10 +176,6 @@ def test_generation_usage_counts_tokens():
     assert usage.tokens() == 38
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="находка L4: вектор в base64 не декодируется, получается список символов",
-)
 def test_base64_embeddings_are_decoded_to_numbers():
     client = cassette_client("embeddings_base64")
     result = client.embeddings.create(
@@ -261,3 +248,53 @@ def test_price_filter_keeps_models_priced_in_tokens():
     assert "inclusionai/ling-2.6-flash" in cheap
     assert "hexgrad/kokoro-82m" in cheap
     assert "black-forest-labs/flux.2-pro" not in cheap
+
+
+def test_image_stream_raises_on_provider_error():
+    """The image stream used to hand the error back as an ordinary chunk."""
+    import httpx
+
+    from routerai import RouterAI
+
+    body = b'data: {"error":{"message":"provider refused","code":429}}\n\ndata: [DONE]\n\n'
+    client = RouterAI(
+        api_key="sk-cassette",
+        max_retries=0,
+        http_client=httpx.Client(
+            transport=httpx.MockTransport(
+                lambda r: httpx.Response(
+                    200, content=body, headers={"content-type": "text/event-stream"}
+                )
+            )
+        ),
+    )
+    with pytest.raises(RateLimitError) as excinfo:
+        list(client.images.stream("black-forest-labs/flux.2-pro", "кот"))
+    assert excinfo.value.status_code == 429
+    client.close()
+
+
+def test_stream_keepalive_with_empty_data_field_is_skipped():
+    """An empty `data:` line is a keep-alive, not a broken event."""
+    import httpx
+
+    from routerai import RouterAI
+
+    body = (
+        b"data: \n\n"
+        b'data: {"choices":[{"delta":{"content":"\xd0\xbe\xd0\xba"}}]}\n\n'
+        b"data: [DONE]\n\n"
+    )
+    client = RouterAI(
+        api_key="sk-cassette",
+        max_retries=0,
+        http_client=httpx.Client(
+            transport=httpx.MockTransport(
+                lambda r: httpx.Response(
+                    200, content=body, headers={"content-type": "text/event-stream"}
+                )
+            )
+        ),
+    )
+    assert "".join(c.content for c in client.chat.stream("m", "hi")) == "ок"
+    client.close()

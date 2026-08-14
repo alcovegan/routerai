@@ -31,6 +31,7 @@ from .errors import (
     NotFoundError,
     PermissionDeniedError,
     RateLimitError,
+    RouterAIError,
     ServerError,
     UnprocessableEntityError,
 )
@@ -38,6 +39,8 @@ from .errors import (
 # A 2xx body that claims failure without naming a code: the gateway broke and
 # did not say how, which is what 502 means.
 SYNTHETIC_UPSTREAM_STATUS = 502
+
+DONE_MARKER = "[DONE]"
 
 _MAX_UNWRAP_DEPTH = 4
 _HTTP_PREFIX = re.compile(r"^\s*HTTP[ :/]?(\d{3})\b")
@@ -267,3 +270,25 @@ def _header(headers: Mapping[str, str] | None, *names: str) -> str | None:
         if value:
             return value
     return None
+
+
+def parse_stream_event(data: str, *, http_status: int = 200) -> dict[str, Any] | None:
+    """Decode one SSE ``data:`` payload, or None when it carries no event.
+
+    Raises the typed error if the event carries one — the same unwrapping the
+    buffered path uses, so a rate limit reads as RateLimitError whether it
+    arrived in a body or in a stream. The end-of-stream marker is the caller's
+    business; here an empty payload is simply a keep-alive.
+    """
+    if not data:
+        return None
+    try:
+        payload = json.loads(data)
+    except ValueError as exc:
+        raise RouterAIError(f"unparsable SSE line: {data!r}") from exc
+    if not isinstance(payload, Mapping):
+        raise RouterAIError(f"unexpected SSE payload: {data!r}")
+    error = build_error(http_status=http_status, body=payload)
+    if error is not None:
+        raise error
+    return dict(payload)

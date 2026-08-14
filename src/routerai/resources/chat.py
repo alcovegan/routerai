@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import base64
 import binascii
-import json
 from collections.abc import AsyncIterator, Iterator, Sequence
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from .._errors import DONE_MARKER, parse_stream_event
 from .._extras import merge_extra as _merge_extra
-from ..errors import APIStatusError, RouterAIError, StreamInterruptedError
+from ..errors import StreamInterruptedError
 from ..schemas import ChatResult, ProviderSelection, ServiceTier, Usage
 
 if TYPE_CHECKING:
@@ -364,7 +364,7 @@ class StreamAccumulator:
         self.generation_id: str | None = None
         self._content: list[str] = []
         self._reasoning: list[str] = []
-        self._tool_calls: list[dict[str, Any]] = []
+        self._tool_calls: dict[int, dict[str, Any]] = {}
         self._audio: list[AudioDelta] = []
         self._usage: Usage | None = None
         self._finish_reason: str | None = None
@@ -378,14 +378,45 @@ class StreamAccumulator:
             self._content.append(chunk.content)
         if chunk.reasoning:
             self._reasoning.append(chunk.reasoning)
-        if chunk.tool_calls:
-            self._tool_calls.extend(chunk.tool_calls)
+        for delta in chunk.tool_calls:
+            self._merge_tool_call(delta)
         if chunk.audio is not None:
             self._audio.append(chunk.audio)
         if chunk.usage is not None:
             self._usage = chunk.usage
         if chunk.finish_reason:
             self._finish_reason = chunk.finish_reason
+
+    def _merge_tool_call(self, delta: dict[str, Any]) -> None:
+        """Fold one tool-call delta into the call it belongs to.
+
+        A tool call arrives split across chunks: the first carries ``id`` and
+        the function name, the rest append a character or two of arguments,
+        all under the same ``index``. Collecting them as separate calls leaves
+        the caller with fragments that no JSON parser will accept.
+        """
+        index = delta.get("index")
+        if not isinstance(index, int):
+            index = len(self._tool_calls)
+        call = self._tool_calls.setdefault(index, {"index": index, "function": {}})
+
+        for key, value in delta.items():
+            if key in ("index", "function"):
+                continue
+            if value is not None:
+                call[key] = value
+
+        function = delta.get("function")
+        if not isinstance(function, dict):
+            return
+        merged = call["function"]
+        for key, value in function.items():
+            if value is None:
+                continue
+            if key == "arguments":
+                merged["arguments"] = f"{merged.get('arguments', '')}{value}"
+            else:
+                merged[key] = value
 
     @property
     def content(self) -> str:
@@ -397,7 +428,8 @@ class StreamAccumulator:
 
     @property
     def tool_calls(self) -> list[dict[str, Any]]:
-        return list(self._tool_calls)
+        """Complete tool calls, ordered by index and ready to execute."""
+        return [self._tool_calls[index] for index in sorted(self._tool_calls)]
 
     @property
     def audio(self) -> list[AudioDelta]:
@@ -428,52 +460,6 @@ class StreamAccumulator:
         }
 
 
-def _parse_sse_event(data: str, chunks_received: int) -> dict[str, Any] | None:
-    if data == "[DONE]":
-        return None
-    try:
-        payload = json.loads(data)
-    except json.JSONDecodeError as exc:
-        raise RouterAIError(f"unparsable SSE line: {data!r}") from exc
-    error = payload.get("error") if isinstance(payload, dict) else None
-    if error:
-        raise APIStatusError(
-            str(error.get("message", error) if isinstance(error, dict) else error),
-            _safe_status(payload),
-            dict(payload),
-        )
-    return dict(payload)
-
-
-def _safe_status(payload: dict[str, Any]) -> int:
-    """Normalize an SSE error status.
-
-    Precedence: nested ``error.status_code``/``error.status``, then root
-    ``status_code``/``status``; malformed or out-of-range values fall back
-    to 502.
-    """
-    error = payload.get("error")
-    if isinstance(error, dict):
-        status = _normalize_status_value(error)
-        if status is not None:
-            return status
-    return _normalize_status_value(payload) or 502
-
-
-def _normalize_status_value(mapping: dict[str, Any]) -> int | None:
-    for key in ("status_code", "status"):
-        value = mapping.get(key)
-        if isinstance(value, bool):
-            continue
-        if isinstance(value, int) and 100 <= value <= 599:
-            return value
-        if isinstance(value, str) and value.isdigit():
-            number = int(value)
-            if 100 <= number <= 599:
-                return number
-    return None
-
-
 def _iter_sse(
     response: Any, *, http: HTTPClient, generation_id: str | None = None
 ) -> Iterator[StreamChunk]:
@@ -483,9 +469,11 @@ def _iter_sse(
             if not line or not line.startswith("data:"):
                 continue
             data = line[5:].strip()
-            payload = _parse_sse_event(data, chunks_received)
-            if payload is None:
+            if data == DONE_MARKER:
                 break
+            payload = parse_stream_event(data)
+            if payload is None:
+                continue
             chunks_received += 1
             yield StreamChunk(payload, generation_id=generation_id)
     except (httpx.TimeoutException, httpx.TransportError) as exc:
@@ -504,9 +492,11 @@ async def _aiter_sse(
             if not line or not line.startswith("data:"):
                 continue
             data = line[5:].strip()
-            payload = _parse_sse_event(data, chunks_received)
-            if payload is None:
+            if data == DONE_MARKER:
                 break
+            payload = parse_stream_event(data)
+            if payload is None:
+                continue
             chunks_received += 1
             yield StreamChunk(payload, generation_id=generation_id)
     except (httpx.TimeoutException, httpx.TransportError) as exc:
