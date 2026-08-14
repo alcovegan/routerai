@@ -3,7 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 from .usage import Usage
 
@@ -15,7 +15,9 @@ class KeyInfo(BaseModel):
 
     id: str | None = None
     name: str | None = None
-    key: str | None = None
+    # SecretStr so printing or logging the object cannot leak a live key:
+    # the value stays reachable through key.get_secret_value().
+    key: SecretStr | None = None
     limit: Decimal | None = None
     expires_at: str | None = None
     created_at: str | None = None

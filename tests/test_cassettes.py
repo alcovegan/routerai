@@ -342,3 +342,54 @@ def test_webhook_rejects_a_signature_it_cannot_compare():
         hashlib.sha256,
     ).hexdigest()
     assert verify_video(body, good, "sk-test", stamp)["task_id"] == "t1"
+
+
+def test_transcription_reads_subtitle_formats_as_text():
+    """srt/vtt/text are plain text; parsing them as JSON is a parse error."""
+    import httpx
+
+    from routerai import RouterAI
+
+    srt = b"1\n00:00:00,000 --> 00:00:02,000\n\xd0\x9f\xd1\x80\xd0\xb8\xd0\xb2\xd0\xb5\xd1\x82\n"
+    client = RouterAI(
+        api_key="sk-cassette",
+        max_retries=0,
+        http_client=httpx.Client(
+            transport=httpx.MockTransport(
+                lambda r: httpx.Response(200, content=srt, headers={"content-type": "text/plain"})
+            )
+        ),
+    )
+    result = client.audio.transcribe(
+        "openai/gpt-4o-mini-transcribe", b"\x00\x01", format="wav", response_format="srt"
+    )
+    assert "Привет" in result.text
+    client.close()
+
+
+def test_cost_formatting_never_loses_a_paid_response():
+    """A malformed cost must not turn a delivered answer into an exception."""
+    import logging as std_logging
+
+    import httpx
+
+    from routerai import RouterAI
+
+    payload = {
+        "choices": [{"message": {"content": "ответ"}}],
+        "usage": {"total_tokens": 10, "cost": "н/д"},
+    }
+    std_logging.getLogger("routerai").setLevel(std_logging.INFO)
+    client = RouterAI(
+        api_key="sk-cassette",
+        max_retries=0,
+        http_client=httpx.Client(
+            transport=httpx.MockTransport(
+                lambda r: httpx.Response(
+                    200, json=payload, headers={"content-type": "application/json"}
+                )
+            )
+        ),
+    )
+    assert client.chat.complete("m", "hi").content == "ответ"
+    client.close()

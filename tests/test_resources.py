@@ -165,7 +165,11 @@ def test_keys_and_team(respx_mock):
     )
     client = RouterAI(api_key="sk-master")
     assert client.keys.list()[0].id == "k1"
-    assert client.keys.create("dev").key == "sk-new"
+    created = client.keys.create("dev")
+    # the key is a secret: readable on purpose, invisible in repr and logs
+    assert created.key is not None
+    assert created.key.get_secret_value() == "sk-new"
+    assert "sk-new" not in repr(created)
     member = client.team.create_member("user@example.com")
     assert member.data is not None and member.data.id == 42
     invite = client.team.invite("inv@example.com")

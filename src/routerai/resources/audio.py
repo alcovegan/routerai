@@ -15,6 +15,8 @@ if TYPE_CHECKING:
     from .._http import HTTPClient
 
 SUPPORTED_AUDIO_FORMATS = {"mp3", "wav", "flac", "m4a", "ogg", "webm", "aac"}
+# Response formats that are text by definition, not JSON documents.
+_TEXT_FORMATS = frozenset({"text", "srt", "vtt"})
 _SUFFIX_FORMATS = {"mpeg": "mp3", "wave": "wav", "oga": "ogg", "mp4": "m4a"}
 
 
@@ -153,7 +155,7 @@ class Audio:
             extra,
         )
         response = self._http.post("audio/transcriptions", json=payload)
-        return TranscriptionResult.from_response(self._http._json(response), response.generation_id)
+        return TranscriptionResult.from_wire(response, response_format)
 
     async def atranscribe(
         self,
@@ -183,7 +185,7 @@ class Audio:
             extra,
         )
         response = await self._http.apost("audio/transcriptions", json=payload)
-        return TranscriptionResult.from_response(self._http._json(response), response.generation_id)
+        return TranscriptionResult.from_wire(response, response_format)
 
     def _stt_payload(
         self,
@@ -298,6 +300,20 @@ class TranscriptionResult:
             text = payload["data"].get("text") or text
         usage = Usage.model_validate(payload["usage"]) if payload.get("usage") else None
         return cls(text, usage, generation_id, payload)
+
+    @classmethod
+    def from_wire(cls, response: Any, response_format: str) -> TranscriptionResult:
+        """Read the transcription in whichever shape the format implies.
+
+        ``text``, ``srt`` and ``vtt`` are plain text by definition; parsing
+        them as JSON is how asking for subtitles used to end in a parse error
+        rather than in subtitles.
+        """
+        if response_format in _TEXT_FORMATS:
+            body = response.body
+            text = body.decode("utf-8", "replace") if isinstance(body, bytes) else str(body)
+            return cls(text, None, response.generation_id, {"text": text})
+        return cls.from_response(response.json(), response.generation_id)
 
     @property
     def cost_rub(self) -> Decimal | None:

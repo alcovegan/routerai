@@ -25,13 +25,18 @@ from .errors import (
     WebhookVerificationError,
 )
 from .registry import Registry
-from .resources.chat import AudioDelta, StreamAccumulator
-from .resources.videos import FrameImage, ImageReference
+from .resources.audio import SpeechResult, TranscriptionResult
+from .resources.chat import AudioDelta, StreamAccumulator, StreamChunk
+from .resources.completions import CompletionChoice, CompletionsResult
+from .resources.embeddings import EmbeddingsResult, RerankResult
+from .resources.images import GeneratedImage, ImageResult, ImageStreamChunk
+from .resources.videos import FrameImage, ImageReference, VideoTask
 from .schemas import (
     Architecture,
     Capability,
     ChatResult,
     Endpoint,
+    GenerationInfo,
     KeyInfo,
     MemberCreation,
     MessagesResult,
@@ -46,6 +51,7 @@ from .schemas import (
     ToolCall,
     Usage,
 )
+from .webhooks import signing_secret, verify_video
 
 __version__: str
 try:
@@ -65,13 +71,20 @@ __all__ = [
     "BadRequestError",
     "Capability",
     "ChatResult",
+    "CompletionChoice",
+    "CompletionsResult",
     "ConfigurationError",
     "ConflictError",
     "DeadlineExceededError",
+    "EmbeddingsResult",
     "Endpoint",
     "ErrorInfo",
     "FrameImage",
+    "GeneratedImage",
+    "GenerationInfo",
     "ImageReference",
+    "ImageResult",
+    "ImageStreamChunk",
     "InsufficientFundsError",
     "KeyInfo",
     "MemberCreation",
@@ -87,20 +100,27 @@ __all__ = [
     "RateLimitError",
     "Registry",
     "RequestError",
+    "RerankResult",
     "ResponseParsingError",
     "ResponsesResult",
     "RouterAI",
     "RouterAIError",
     "ServerError",
     "ServiceTier",
+    "SpeechResult",
     "StreamAccumulator",
+    "StreamChunk",
     "StreamInterruptedError",
     "TeamInvitation",
     "TeamMember",
     "ToolCall",
+    "TranscriptionResult",
     "UnprocessableEntityError",
     "Usage",
     "VideoGenerationError",
+    "VideoTask",
     "WebhookVerificationError",
     "__version__",
+    "signing_secret",
+    "verify_video",
 ]
