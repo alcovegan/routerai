@@ -11,6 +11,7 @@ XPASS — сигнал снять маркер.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -25,9 +26,10 @@ from routerai import (
     RateLimitError,
     StreamAccumulator,
 )
+from routerai.errors import ModelNotFoundError
 from routerai.schemas import ModelPricing, Usage
 
-from .cassettes import cassette_client, load
+from .cassettes import acassette_client, cassette_client, load
 
 CATALOG = "catalog_models"
 
@@ -483,3 +485,83 @@ def test_response_format_reaches_the_stream():
     assert sent["response_format"] == {"type": "json_object"}
     assert sent["stream"] is True
     client.close()
+
+
+def test_cheapest_picks_a_model_that_is_actually_cheap():
+    """The catalog knows the prices; choosing by hand is what users do today."""
+    client = cassette_client(CATALOG)
+    # "text" alone also matches embedding models, which really are cheaper —
+    # ask for tools to get a chat model
+    pick = client.models.cheapest(capabilities=["tools"])
+    assert pick.id == "inclusionai/ling-2.6-flash"
+    # image and video models are billed in another unit and must not win a
+    # comparison of token prices
+    assert pick.pricing.per_million("prompt") is not None
+    with pytest.raises(ModelNotFoundError):
+        client.models.cheapest(capabilities=["tools"], min_context=10**9)
+    client.close()
+
+
+def test_async_catalog_search_does_not_need_the_sync_path():
+    client = acassette_client(CATALOG)
+
+    async def main():
+        hits = await client.models.asearch(capabilities=["tools"])
+        assert "mistralai/mistral-nemo" in {m.id for m in hits}
+        grouped = await client.models.agrouped()
+        assert grouped
+        pick = await client.models.acheapest(capabilities=["tools"])
+        assert pick.id == "inclusionai/ling-2.6-flash"
+        await client.aclose()
+
+    asyncio.run(main())
+
+
+def test_parse_validates_the_answer_against_a_model():
+    """Structured output: the schema asked for and the schema checked are the same one."""
+    import httpx
+    from pydantic import BaseModel
+
+    from routerai import RouterAI
+    from routerai.errors import ResponseParsingError
+
+    class City(BaseModel):
+        name: str
+        population: int
+
+    sent: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": '{"name":"Москва","population":13000000}'}}]},
+            headers={"content-type": "application/json"},
+        )
+
+    client = RouterAI(
+        api_key="sk-cassette",
+        max_retries=0,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    answer = client.chat.parse("m", "Столица России?", response_model=City)
+    assert answer.parsed.name == "Москва"
+    assert answer.parsed.population == 13_000_000
+    assert sent["response_format"]["json_schema"]["name"] == "City"
+
+    def bad(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "не json"}}]},
+            headers={"content-type": "application/json"},
+        )
+
+    broken = RouterAI(
+        api_key="sk-cassette",
+        max_retries=0,
+        http_client=httpx.Client(transport=httpx.MockTransport(bad)),
+    )
+    with pytest.raises(ResponseParsingError):
+        broken.chat.parse("m", "hi", response_model=City)
+    client.close()
+    broken.close()

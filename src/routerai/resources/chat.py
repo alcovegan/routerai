@@ -2,16 +2,18 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 from collections.abc import AsyncIterator, Iterator, Sequence
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 import httpx
+from pydantic import BaseModel, ValidationError
 
 from .._errors import DONE_MARKER, parse_stream_event
 from .._extras import merge_extra as _merge_extra
 from .._options import RequestOptions
-from ..errors import StreamInterruptedError
+from ..errors import ResponseParsingError, StreamInterruptedError
 from ..schemas import ChatResult, ProviderSelection, ServiceTier, Usage
 
 if TYPE_CHECKING:
@@ -190,6 +192,59 @@ class Chat:
             body.update(extra)
         return body
 
+    def parse(
+        self,
+        model: str,
+        prompt: str | Sequence[MessageInput],
+        *,
+        response_model: type[BaseModel],
+        system: str | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        extra: dict[str, Any] | None = None,
+        **opts: Unpack[RequestOptions],
+    ) -> ParsedResult[Any]:
+        """Ask for a structured answer and validate it against ``response_model``.
+
+        The JSON schema is derived from the model, so the shape asked for and
+        the shape validated cannot drift apart.
+        """
+        result = self.complete(
+            model,
+            prompt,
+            system=system,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            response_format=_json_schema_format(response_model),
+            extra=extra,
+            **opts,
+        )
+        return ParsedResult(result, _validate_parsed(result, response_model))
+
+    async def aparse(
+        self,
+        model: str,
+        prompt: str | Sequence[MessageInput],
+        *,
+        response_model: type[BaseModel],
+        system: str | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        extra: dict[str, Any] | None = None,
+        **opts: Unpack[RequestOptions],
+    ) -> ParsedResult[Any]:
+        result = await self.acomplete(
+            model,
+            prompt,
+            system=system,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            response_format=_json_schema_format(response_model),
+            extra=extra,
+            **opts,
+        )
+        return ParsedResult(result, _validate_parsed(result, response_model))
+
     # --- streaming ---
 
     def stream(
@@ -276,6 +331,63 @@ class Chat:
                 generation_id=response.headers.get("X-Generation-Id"),
             ):
                 yield chunk
+
+
+ParsedT = TypeVar("ParsedT", bound=BaseModel)
+
+
+class ParsedResult(Generic[ParsedT]):
+    """A chat result plus the object it was validated into."""
+
+    def __init__(self, result: ChatResult, parsed: ParsedT) -> None:
+        self.result = result
+        self.parsed = parsed
+
+    @property
+    def content(self) -> str | None:
+        return self.result.content
+
+    @property
+    def usage(self) -> Usage | None:
+        return self.result.usage
+
+    @property
+    def cost_rub(self) -> Decimal | None:
+        return self.result.cost_rub
+
+    @property
+    def generation_id(self) -> str | None:
+        return self.result.generation_id
+
+
+def _json_schema_format(response_model: type[BaseModel]) -> dict[str, Any]:
+    schema = response_model.model_json_schema()
+    schema.setdefault("additionalProperties", False)
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": response_model.__name__,
+            "schema": schema,
+            "strict": True,
+        },
+    }
+
+
+def _validate_parsed(result: ChatResult, response_model: type[ParsedT]) -> ParsedT:
+    if not result.content:
+        raise ResponseParsingError("model returned no content to parse", body=result.raw)
+    try:
+        payload = json.loads(result.content)
+    except ValueError as exc:
+        raise ResponseParsingError(
+            "model did not return JSON despite the requested schema", body=result.content
+        ) from exc
+    try:
+        return response_model.model_validate(payload)
+    except ValidationError as exc:
+        raise ResponseParsingError(
+            f"model output does not match {response_model.__name__}: {exc}", body=payload
+        ) from exc
 
 
 class StreamChunk:

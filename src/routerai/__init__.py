@@ -27,7 +27,7 @@ from .errors import (
 )
 from .registry import Registry
 from .resources.audio import SpeechResult, TranscriptionResult
-from .resources.chat import AudioDelta, StreamAccumulator, StreamChunk
+from .resources.chat import AudioDelta, ParsedResult, StreamAccumulator, StreamChunk
 from .resources.completions import CompletionChoice, CompletionsResult
 from .resources.embeddings import EmbeddingsResult, RerankResult
 from .resources.images import GeneratedImage, ImageResult, ImageStreamChunk
@@ -89,6 +89,7 @@ __all__ = [
     "ModelPricing",
     "NoProviderError",
     "NotFoundError",
+    "ParsedResult",
     "PermissionDeniedError",
     "ProviderSelection",
     "RateLimitError",
