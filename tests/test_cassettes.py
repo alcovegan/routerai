@@ -565,3 +565,41 @@ def test_parse_validates_the_answer_against_a_model():
         broken.chat.parse("m", "hi", response_model=City)
     client.close()
     broken.close()
+
+
+def test_async_stream_closes_the_connection_when_used_as_a_context_manager():
+    """Reference counting saves the sync case; the async one needs closing."""
+    import httpx
+
+    from routerai import RouterAI
+
+    body = b"".join(b'data: {"choices":[{"delta":{"content":"x"}}]}\n\n' for _ in range(50))
+    state = {"open": 0, "closed": 0}
+
+    class Tracked(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            state["open"] += 1
+
+            class Stream(httpx.AsyncByteStream):
+                async def __aiter__(self):
+                    for start in range(0, len(body), 32):
+                        yield body[start : start + 32]
+
+                async def aclose(self) -> None:
+                    state["closed"] += 1
+
+            return httpx.Response(
+                200, stream=Stream(), headers={"content-type": "text/event-stream"}
+            )
+
+    async def main() -> None:
+        client = RouterAI(
+            api_key="sk-cassette", async_http_client=httpx.AsyncClient(transport=Tracked())
+        )
+        async with client.chat.astream("m", "hi") as stream:
+            async for _ in stream:
+                break
+        assert state == {"open": 1, "closed": 1}
+        await client.aclose()
+
+    asyncio.run(main())

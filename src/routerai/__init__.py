@@ -27,7 +27,14 @@ from .errors import (
 )
 from .registry import Registry
 from .resources.audio import SpeechResult, TranscriptionResult
-from .resources.chat import AudioDelta, ParsedResult, StreamAccumulator, StreamChunk
+from .resources.chat import (
+    AsyncChatStream,
+    AudioDelta,
+    ChatStream,
+    ParsedResult,
+    StreamAccumulator,
+    StreamChunk,
+)
 from .resources.completions import CompletionChoice, CompletionsResult
 from .resources.embeddings import EmbeddingsResult, RerankResult
 from .resources.images import GeneratedImage, ImageResult, ImageStreamChunk
@@ -60,11 +67,13 @@ __all__ = [
     "APIStatusError",
     "APITimeoutError",
     "Architecture",
+    "AsyncChatStream",
     "AudioDelta",
     "AuthenticationError",
     "BadRequestError",
     "Capability",
     "ChatResult",
+    "ChatStream",
     "CompletionChoice",
     "CompletionsResult",
     "ConfigurationError",

@@ -264,7 +264,7 @@ class Chat:
         stop: list[str] | None = None,
         extra: dict[str, Any] | None = None,
         **opts: Unpack[RequestOptions],
-    ) -> Iterator[StreamChunk]:
+    ) -> ChatStream:
         body = self._build_body(
             model,
             prompt,
@@ -281,14 +281,17 @@ class Chat:
             extra=extra,
         )
         body["stream"] = True
+        return ChatStream(self._stream_chunks(body, opts))
+
+    def _stream_chunks(self, body: dict[str, Any], opts: RequestOptions) -> Iterator[StreamChunk]:
         with self._http.stream_request("POST", "chat/completions", json=body, **opts) as response:
             yield from _iter_sse(
                 response,
                 http=self._http,
-                generation_id=response.headers.get("X-Generation-Id"),
+                generation_id=response.generation_id,
             )
 
-    async def astream(
+    def astream(
         self,
         model: str,
         prompt: str | Sequence[MessageInput],
@@ -305,7 +308,7 @@ class Chat:
         stop: list[str] | None = None,
         extra: dict[str, Any] | None = None,
         **opts: Unpack[RequestOptions],
-    ) -> AsyncIterator[StreamChunk]:
+    ) -> AsyncChatStream:
         body = self._build_body(
             model,
             prompt,
@@ -322,13 +325,18 @@ class Chat:
             extra=extra,
         )
         body["stream"] = True
+        return AsyncChatStream(self._astream_chunks(body, opts))
+
+    async def _astream_chunks(
+        self, body: dict[str, Any], opts: RequestOptions
+    ) -> AsyncIterator[StreamChunk]:
         async with self._http.astream_request(
             "POST", "chat/completions", json=body, **opts
         ) as response:
             async for chunk in _aiter_sse(
                 response,
                 http=self._http,
-                generation_id=response.headers.get("X-Generation-Id"),
+                generation_id=response.generation_id,
             ):
                 yield chunk
 
@@ -388,6 +396,67 @@ def _validate_parsed(result: ChatResult, response_model: type[ParsedT]) -> Parse
         raise ResponseParsingError(
             f"model output does not match {response_model.__name__}: {exc}", body=payload
         ) from exc
+
+
+class ChatStream:
+    """An open chat stream.
+
+    Iterating works exactly as before. The context-manager form closes the
+    connection deterministically::
+
+        with client.chat.stream(model, prompt) as stream:
+            for chunk in stream:
+                ...
+    """
+
+    def __init__(self, chunks: Iterator[StreamChunk]) -> None:
+        self._chunks = chunks
+
+    def __iter__(self) -> Iterator[StreamChunk]:
+        return self._chunks
+
+    def __next__(self) -> StreamChunk:
+        return next(self._chunks)
+
+    def __enter__(self) -> ChatStream:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        close = getattr(self._chunks, "close", None)
+        if close is not None:
+            close()
+
+
+class AsyncChatStream:
+    """The async counterpart of :class:`ChatStream`.
+
+    Here the context manager matters more than convenience: reference counting
+    closes an abandoned sync generator, but an abandoned async one keeps the
+    connection until the loop shuts down its async generators.
+    """
+
+    def __init__(self, chunks: AsyncIterator[StreamChunk]) -> None:
+        self._chunks = chunks
+
+    def __aiter__(self) -> AsyncIterator[StreamChunk]:
+        return self._chunks
+
+    async def __anext__(self) -> StreamChunk:
+        return await self._chunks.__anext__()
+
+    async def __aenter__(self) -> AsyncChatStream:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        await self.aclose()
+
+    async def aclose(self) -> None:
+        aclose = getattr(self._chunks, "aclose", None)
+        if aclose is not None:
+            await aclose()
 
 
 class StreamChunk:
