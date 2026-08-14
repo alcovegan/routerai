@@ -1,0 +1,22 @@
+{
+  "name": "embeddings_ok",
+  "note": "Эмбеддинги обычным списком чисел",
+  "finding": "08",
+  "recorded_from": "https://routerai.ru/api/v1",
+  "request": {
+    "method": "POST",
+    "path": "/embeddings",
+    "body": {
+      "model": "perplexity/pplx-embed-v1-0.6B",
+      "input": [
+        "привет",
+        "hello"
+      ]
+    }
+  },
+  "response": {
+    "status": 200,
+    "content_type": "application/json",
+    "body": "{\"object\": \"list\", \"data\": [{\"object\": \"embedding\", \"embedding\": [-0.2890625, -0.4140625, 0, -0.21875, 0.6953125, 0.234375, 0.09375, 0.6171875], \"index\": 0}, {\"object\": \"embedding\", \"embedding\": [-0.640625, 0.140625, 0, 0.109375, 0.7890625, -0.3046875, 0.375, 0.671875], \"index\": 1}], \"model\": \"pplx-embed-v1-0.6b\", \"usage\": {\"total_tokens\": 4, \"prompt_tokens\": 4}, \"provider\": \"Perplexity\", \"id\": \"rai-emb-1786734061-OebIOgwtNvgyxkTmilqd\"}"
+  }
+}

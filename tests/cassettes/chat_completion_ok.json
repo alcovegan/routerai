@@ -1,0 +1,25 @@
+{
+  "name": "chat_completion_ok",
+  "note": "Обычный ответ чата: usage с prompt_tokens/completion_tokens/cost, padding-пробелы перед JSON, заголовок X-Generation-Id",
+  "finding": "08, 22",
+  "recorded_from": "https://routerai.ru/api/v1",
+  "request": {
+    "method": "POST",
+    "path": "/chat/completions",
+    "body": {
+      "model": "inclusionai/ling-2.6-flash",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Ответь одним словом: столица Франции?"
+        }
+      ],
+      "max_tokens": 16
+    }
+  },
+  "response": {
+    "status": 200,
+    "content_type": "application/json",
+    "body": "\n         \n\n         \n{\"id\":\"rai-1786733732-Nh0dEtoMPn40gTZTk8FA\",\"object\":\"chat.completion\",\"created\":1786733732,\"model\":\"inclusionai/ling-2.6-flash\",\"provider\":\"Novita\",\"system_fingerprint\":null,\"service_tier\":null,\"choices\":[{\"index\":0,\"logprobs\":null,\"finish_reason\":\"stop\",\"native_finish_reason\":\"stop\",\"message\":{\"role\":\"assistant\",\"content\":\"Париж\",\"refusal\":null,\"reasoning\":null}}],\"usage\":{\"total_tokens\":38,\"prompt_tokens\":33,\"prompt_tokens_details\":{\"cached_tokens\":0,\"cache_write_tokens\":0,\"audio_tokens\":0,\"video_tokens\":0},\"completion_tokens\":5,\"completion_tokens_details\":{\"reasoning_tokens\":0,\"image_tokens\":0,\"audio_tokens\":0},\"cost\":0.0000522948192}}"
+  }
+}
