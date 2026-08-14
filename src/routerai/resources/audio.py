@@ -262,7 +262,8 @@ def _read_audio(file: str | Path | bytes | BinaryIO) -> tuple[bytes, str | None]
         return file, None
     name = getattr(file, "name", None)
     stream = file.read()
-    assert isinstance(stream, bytes)
+    if not isinstance(stream, bytes):
+        raise ValueError(f"audio file must be opened in binary mode, got {type(stream).__name__}")
     return stream, name
 
 

@@ -603,3 +603,49 @@ def test_async_stream_closes_the_connection_when_used_as_a_context_manager():
         await client.aclose()
 
     asyncio.run(main())
+
+
+@pytest.mark.parametrize(
+    "host",
+    ["2130706433", "0x7f000001", "0177.0.0.1", "127.1", "3232235777", "2852039166"],
+)
+def test_alternative_ipv4_forms_are_not_public(host: str):
+    """The resolver understands these; a check written against ipaddress did not."""
+    from routerai._urls import validate_public_https_url
+
+    with pytest.raises(ValueError):
+        validate_public_https_url(f"https://{host}/image.png")
+
+
+def test_ordinary_hosts_still_pass():
+    from routerai._urls import validate_public_https_url
+
+    assert validate_public_https_url("https://example.com/i.png")
+    assert validate_public_https_url("https://8.8.8.8/i.png")
+
+
+def test_sync_and_async_agree_on_a_missed_deadline():
+    """The same timeout used to raise RequestError in sync and DeadlineExceededError in async."""
+    import time
+
+    import httpx
+
+    from routerai import RouterAI
+    from routerai.errors import DeadlineExceededError
+
+    def slow(request: httpx.Request) -> httpx.Response:
+        time.sleep(0.15)
+        raise httpx.ReadTimeout("read timeout", request=request)
+
+    client = RouterAI(
+        api_key="sk-cassette",
+        max_retries=0,
+        http_client=httpx.Client(transport=httpx.MockTransport(slow)),
+    )
+    task = client.videos.get.__self__
+    from routerai.resources.videos import VideoTask
+
+    video = VideoTask(client._http, {"id": "t1", "status": "processing"})
+    with pytest.raises(DeadlineExceededError):
+        video.refresh(deadline=time.monotonic() + 0.05)
+    client.close()

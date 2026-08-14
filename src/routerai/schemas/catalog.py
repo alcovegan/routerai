@@ -219,15 +219,6 @@ class ModelDetail(BaseModel):
     endpoints: list[Endpoint] = []
 
 
-class VariablePricing(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    type: str | None = None
-    prompt: Decimal | None = None
-    completion: Decimal | None = None
-    threshold: int | None = None
-
-
 class EndpointPricing(BaseModel):
     """Helper alias for the pricing payload on endpoints."""
 

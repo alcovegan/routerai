@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import platform
 import random
+import threading
 import time
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping
@@ -302,6 +303,7 @@ class HTTPClient:
         self._owns_async = self._async_client is None
         self._sync_closed = False
         self._async_closed = False
+        self._transport_lock = threading.Lock()
         self.usage = UsageTracker()
         self._trackers: ContextVar[tuple[UsageTracker, ...]] = ContextVar(
             f"routerai_trackers_{id(self)}", default=()
@@ -350,8 +352,12 @@ class HTTPClient:
         if self._sync_closed:
             raise RuntimeError("client is closed")
         if self._sync_client is None:
-            self._sync_client = httpx.Client()
-            self._owns_sync = True
+            # Under a lock: two threads racing here would each build a pool,
+            # and only one of them would ever be closed.
+            with self._transport_lock:
+                if self._sync_client is None:
+                    self._sync_client = httpx.Client()
+                    self._owns_sync = True
         return self._sync_client
 
     def _ensure_async_client(self) -> httpx.AsyncClient:
@@ -604,6 +610,12 @@ class HTTPClient:
                 )
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 last_exc = exc
+                if deadline is not None and time.monotonic() >= deadline:
+                    # Same situation as the async path, which reports the
+                    # deadline rather than the socket timeout that ended it.
+                    raise DeadlineExceededError(
+                        f"deadline exceeded while waiting for attempt {attempt + 1}"
+                    ) from exc
                 if attempt < call.max_retries and self._should_retry_transport(method, exc):
                     self._logger.warning(
                         "retry %s %s after %s (attempt %d)", method, url, mask_key(exc), attempt + 1

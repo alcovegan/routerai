@@ -89,15 +89,13 @@ class Models:
         if force_refresh:
             self.clear_cache()
         self._refresh_if_stale()
-        assert self._cache is not None
-        return list(self._cache)
+        return list(self._cache or [])
 
     async def aall(self, *, force_refresh: bool = False) -> ModelList:
         if force_refresh:
             self.clear_cache()
         await self._arefresh_if_stale()
-        assert self._cache is not None
-        return list(self._cache)
+        return list(self._cache or [])
 
     def get(self, model_id: str) -> Model:
         """Return a model by its exact id, e.g. ``"deepseek/deepseek-v4-pro"``."""
@@ -195,29 +193,56 @@ class Models:
     def text(self) -> ModelList:
         return self.by_capability(Capability.TEXT)
 
+    async def atext(self) -> ModelList:
+        return await self.aby_capability(Capability.TEXT)
+
     def reasoning(self) -> ModelList:
         return self.by_capability(Capability.REASONING)
+
+    async def areasoning(self) -> ModelList:
+        return await self.aby_capability(Capability.REASONING)
 
     def vision(self) -> ModelList:
         return self.by_capability(Capability.VISION)
 
+    async def avision(self) -> ModelList:
+        return await self.aby_capability(Capability.VISION)
+
     def image_generation(self) -> ModelList:
         return self.by_capability(Capability.IMAGE_GENERATION)
+
+    async def aimage_generation(self) -> ModelList:
+        return await self.aby_capability(Capability.IMAGE_GENERATION)
 
     def embeddings(self) -> ModelList:
         return self.by_capability(Capability.EMBEDDINGS)
 
+    async def aembeddings(self) -> ModelList:
+        return await self.aby_capability(Capability.EMBEDDINGS)
+
     def rerank(self) -> ModelList:
         return self.by_capability(Capability.RERANK)
+
+    async def arerank(self) -> ModelList:
+        return await self.aby_capability(Capability.RERANK)
 
     def speech(self) -> ModelList:
         return self.by_capability(Capability.SPEECH)
 
+    async def aspeech(self) -> ModelList:
+        return await self.aby_capability(Capability.SPEECH)
+
     def audio_generation(self) -> ModelList:
         return self.by_capability(Capability.AUDIO_GENERATION)
 
+    async def aaudio_generation(self) -> ModelList:
+        return await self.aby_capability(Capability.AUDIO_GENERATION)
+
     def transcription(self) -> ModelList:
         return self.by_capability(Capability.TRANSCRIPTION)
+
+    async def atranscription(self) -> ModelList:
+        return await self.aby_capability(Capability.TRANSCRIPTION)
 
     async def aby_capability(self, capability: str | Capability) -> ModelList:
         cap = Capability(capability)

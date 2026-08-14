@@ -4,6 +4,7 @@ import base64
 import binascii
 import ipaddress
 import re
+import socket
 import urllib.parse
 
 DEFAULT_MAX_INLINE_IMAGE_BYTES = 50 * 1024 * 1024
@@ -39,9 +40,8 @@ def validate_public_https_url(value: str, *, field: str = "url") -> str:
     normalized_host = host.lower()
     if normalized_host == "localhost" or normalized_host.endswith(".localhost"):
         raise ValueError(f"{field} host is not public: {normalized_host!r}")
-    try:
-        ip = ipaddress.ip_address(normalized_host)
-    except ValueError:
+    ip = _as_ip(normalized_host)
+    if ip is None:
         return value
     if (
         ip.is_loopback
@@ -77,3 +77,22 @@ def validate_image_source(
     if not decoded:
         raise ValueError("image data uri payload is empty")
     return value
+
+
+def _as_ip(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """The address this host literally is, or None if it is a name.
+
+    ``ipaddress`` only understands the canonical dotted form, while the
+    resolver also accepts decimal, hex, octal and short forms — so
+    "2130706433", "0x7f000001" and "127.1" all reach 127.0.0.1 while passing
+    a check written against ipaddress alone.
+    """
+    try:
+        return ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    try:
+        packed = socket.inet_aton(host)
+    except OSError:
+        return None
+    return ipaddress.IPv4Address(packed)
