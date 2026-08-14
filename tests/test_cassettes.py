@@ -22,7 +22,7 @@ from routerai import (
     RateLimitError,
     StreamAccumulator,
 )
-from routerai.schemas import Usage
+from routerai.schemas import ModelPricing, Usage
 
 from .cassettes import cassette_client, load
 
@@ -178,10 +178,6 @@ def test_embeddings_rate_limit_maps_to_rate_limit_error():
         client.embeddings.create("perplexity/pplx-embed-v1-0.6B", "привет")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="находка 08/L3: tokens() не суммирует input_tokens/output_tokens",
-)
 def test_transcription_usage_counts_tokens():
     """Транскрипция отдаёт usage в другом именовании полей."""
     client = cassette_client("transcription_ok")
@@ -190,10 +186,6 @@ def test_transcription_usage_counts_tokens():
     assert result.usage.tokens() == 8
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="находка 08/L3: usage из /generation использует input_tokens/output_tokens",
-)
 def test_generation_usage_counts_tokens():
     usage = Usage.model_validate({"input_tokens": 33, "output_tokens": 5})
     assert usage.tokens() == 38
@@ -214,20 +206,12 @@ def test_base64_embeddings_are_decoded_to_numbers():
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="находка L2: цена картинок лежит в image_output, а prompt/completion равны нулю",
-)
 def test_image_model_price_is_reachable():
     client = cassette_client(CATALOG)
     flux = client.models.get("black-forest-labs/flux.2-pro")
     assert flux.pricing.per_million("image_output") is not None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="находка L2: поиск по цене считает бесплатными модели с ценой в других полях",
-)
 def test_price_filter_excludes_models_priced_in_other_units():
     client = cassette_client(CATALOG)
     cheap = client.models.search(max_price_prompt=1.0)
@@ -254,3 +238,40 @@ def test_typed_errors_carry_status_and_body():
         client.account.credits()
     assert getattr(excinfo.value, "status_code", None) == 401
     assert getattr(excinfo.value, "body", None) is not None
+
+
+def test_cost_survives_a_serialization_round_trip():
+    """Caching a result must not lose the price: dump then validate keeps it."""
+    usage = Usage.model_validate({"total_tokens": 10, "cost": "1.2345"})
+    assert usage.cost_rub == Decimal("1.2345")
+    assert Usage.model_validate(usage.model_dump()).cost_rub == Decimal("1.2345")
+    assert Usage.model_validate(json.loads(usage.model_dump_json())).cost_rub == Decimal("1.2345")
+    assert Usage(cost_rub=Decimal("9.99")).cost_rub == Decimal("9.99")
+    assert usage.model_dump(by_alias=True)["cost"] == Decimal("1.2345")
+
+
+def test_pricing_exposes_units_other_than_tokens():
+    """Image and rerank models charge per image and per search unit, not per token."""
+    client = cassette_client(CATALOG)
+    flux = client.models.get("black-forest-labs/flux.2-pro")
+    rerank = client.models.get("cohere/rerank-4-pro")
+    video = client.models.get("kwaivgi/kling-v3.0-std")
+
+    assert flux.pricing.priced_units() == {"image_output"}
+    assert rerank.pricing.priced_units() == {"search_units"}
+    assert video.pricing.priced_units() == {"seconds"}
+    assert flux.pricing.price("image_output") == Decimal("0.000797955615234375")
+    assert not flux.pricing.is_free()
+    # a unit the SDK has never heard of still reads back as a Decimal
+    unknown = ModelPricing.model_validate({"prompt": 0.0, "brand_new_unit": 0.25})
+    assert unknown.price("brand_new_unit") == Decimal("0.25")
+    assert unknown.per_million("brand_new_unit") == Decimal("250000")
+
+
+def test_price_filter_keeps_models_priced_in_tokens():
+    """The stricter price filter must not throw out ordinary text models."""
+    client = cassette_client(CATALOG)
+    cheap = {m.id for m in client.models.search(max_price_prompt=100.0)}
+    assert "inclusionai/ling-2.6-flash" in cheap
+    assert "hexgrad/kokoro-82m" in cheap
+    assert "black-forest-labs/flux.2-pro" not in cheap

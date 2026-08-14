@@ -4,6 +4,7 @@ import asyncio
 import threading
 import time
 from collections.abc import Iterable
+from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from ..errors import ModelNotFoundError
@@ -162,14 +163,14 @@ class Models:
                 continue
             if min_context and (model.context_length is None or model.context_length < min_context):
                 continue
-            if max_price_prompt is not None:
-                price = model.pricing.per_million("prompt")
-                if price is None or price > max_price_prompt:
-                    continue
-            if max_price_completion is not None:
-                price = model.pricing.per_million("completion")
-                if price is None or price > max_price_completion:
-                    continue
+            if max_price_prompt is not None and not _within_price(
+                model, "prompt", max_price_prompt
+            ):
+                continue
+            if max_price_completion is not None and not _within_price(
+                model, "completion", max_price_completion
+            ):
+                continue
             results.append(model)
         return results
 
@@ -236,6 +237,22 @@ class Models:
     async def alist(self, *, force_refresh: bool = False) -> ModelList:
         """Alias for :meth:`aall`."""
         return await self.aall(force_refresh=force_refresh)
+
+
+def _within_price(model: Model, unit: str, limit: float) -> bool:
+    """Whether the model fits a per-million price limit for ``unit``.
+
+    A model billed in another unit (images, seconds, search units) reports zero
+    for tokens. Treating that as "free" is how a price filter ends up returning
+    the most expensive models in the catalog, so such models are excluded
+    instead: the limit simply does not apply to them.
+    """
+    price = model.pricing.per_million(unit)
+    if price is None:
+        return False
+    if price == 0 and model.pricing.priced_units() - {unit}:
+        return False
+    return price <= Decimal(str(limit))
 
 
 def _normalize_capabilities(values: Iterable[str | Capability] | None) -> set[Capability]:

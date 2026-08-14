@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 MILLION = Decimal("1000000")
 
@@ -38,18 +38,83 @@ class Architecture(BaseModel):
 
 
 class ModelPricing(BaseModel):
-    """Prices in rubles per token (or per unit for non-token models)."""
+    """Prices in rubles per unit.
+
+    Token models are priced per token via ``prompt``/``completion``. Others are
+    priced in their own unit: image generators use ``image_output``, rerank uses
+    ``search_units``, video uses ``seconds``. In the live catalog 64 of 458
+    models have no token price at all, so ``prompt == 0`` must never be read as
+    "free" — use :meth:`priced_units` to see what a model actually charges for.
+    """
 
     model_config = ConfigDict(extra="allow")
 
     prompt: Decimal | None = None
     completion: Decimal | None = None
+    request: Decimal | None = None
+    image: Decimal | None = None
+    image_output: Decimal | None = None
+    image_token: Decimal | None = None
+    audio: Decimal | None = None
+    audio_output: Decimal | None = None
+    seconds: Decimal | None = None
+    search_units: Decimal | None = None
+    web_search: Decimal | None = None
+    input_cache_read: Decimal | None = None
+    input_cache_write: Decimal | None = None
+    input_audio_cache: Decimal | None = None
+    internal_reasoning: Decimal | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _decimalize(cls, data: Any) -> Any:
+        """Coerce every numeric price to Decimal, including unknown units.
+
+        ``extra="allow"`` keeps unknown fields as floats, and multiplying a
+        float by a Decimal raises TypeError — so a price the SDK does not know
+        about yet would break :meth:`per_million` instead of just working.
+        """
+        if not isinstance(data, dict):
+            return data
+        coerced: dict[Any, Any] = {}
+        for key, value in data.items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                try:
+                    coerced[key] = Decimal(str(value))
+                except InvalidOperation:
+                    coerced[key] = value
+            else:
+                coerced[key] = value
+        return coerced
+
+    def price(self, unit: str = "prompt") -> Decimal | None:
+        """Price per single unit, reading declared fields and unknown ones alike."""
+        value = getattr(self, unit, None)
+        if value is None and self.model_extra:
+            value = self.model_extra.get(unit)
+        return value if isinstance(value, Decimal) else None
 
     def per_million(self, field: str = "prompt") -> Decimal | None:
-        value: Decimal | None = getattr(self, field, None)
+        """Price per million units. For non-token models the unit is not a token."""
+        value = self.price(field)
         if value is None:
             return None
         return value * MILLION
+
+    def priced_units(self) -> frozenset[str]:
+        """Units this model actually charges for."""
+        units = {
+            name
+            for name in type(self).model_fields
+            if isinstance(getattr(self, name, None), Decimal) and getattr(self, name) > 0
+        }
+        for name, value in (self.model_extra or {}).items():
+            if isinstance(value, Decimal) and value > 0:
+                units.add(name)
+        return frozenset(units)
+
+    def is_free(self) -> bool:
+        return not self.priced_units()
 
 
 class Model(BaseModel):
