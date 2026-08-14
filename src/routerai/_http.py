@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from json import loads as _json_loads
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -235,6 +236,8 @@ class HTTPClient:
         self._async_client = async_http_client
         self._owns_sync = self._sync_client is None
         self._owns_async = self._async_client is None
+        self._sync_closed = False
+        self._async_closed = False
 
     @property
     def logger(self) -> logging.Logger:
@@ -262,19 +265,40 @@ class HTTPClient:
             )
 
     def _ensure_sync_client(self) -> httpx.Client:
+        if self._sync_closed:
+            raise RuntimeError("client is closed")
         if self._sync_client is None:
             self._sync_client = httpx.Client()
             self._owns_sync = True
         return self._sync_client
 
     def _ensure_async_client(self) -> httpx.AsyncClient:
+        if self._async_closed:
+            raise RuntimeError("client is closed")
         if self._async_client is None:
             self._async_client = httpx.AsyncClient()
             self._owns_async = True
         return self._async_client
 
     def _build_url(self, path: str) -> str:
-        return f"{self._base_url}/{path.lstrip('/')}"
+        """Join the path to the base url, escaping each segment.
+
+        Identifiers come from callers and sometimes from other systems. Without
+        escaping, a task id of "../keys" walks out of /api/v1 and sends the
+        Authorization header to a different endpoint entirely. Dot segments are
+        escaped explicitly — quote() leaves them alone, and httpx would resolve
+        them away.
+        """
+        segments = []
+        for segment in path.strip("/").split("/"):
+            if not segment:
+                continue
+            if segment in (".", ".."):
+                segment = segment.replace(".", "%2E")
+            else:
+                segment = quote(segment, safe="")
+            segments.append(segment)
+        return f"{self._base_url}/{'/'.join(segments)}"
 
     def _merge_headers(
         self, headers: dict[str, str] | None, *, content: bytes | None = None
@@ -737,13 +761,20 @@ class HTTPClient:
         return await self.arequest("POST", path, **kwargs)
 
     def close(self) -> None:
+        """Close the sync side. Requests after this raise RuntimeError.
+
+        Only the sync transport is affected: the async one has its own
+        lifecycle and its own :meth:`aclose`. An injected transport is never
+        closed here, but it is not silently replaced either — before this the
+        next request quietly opened a brand new pool, discarding proxy, mTLS
+        and timeout settings the caller had configured.
+        """
         if self._sync_client is not None and self._owns_sync:
             self._sync_client.close()
-        self._sync_client = None
-        self._owns_sync = True
+        self._sync_closed = True
 
     async def aclose(self) -> None:
+        """Close the async side. Requests after this raise RuntimeError."""
         if self._async_client is not None and self._owns_async:
             await self._async_client.aclose()
-        self._async_client = None
-        self._owns_async = True
+        self._async_closed = True

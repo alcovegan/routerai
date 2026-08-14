@@ -16,8 +16,20 @@ from ..schemas import Usage
 if TYPE_CHECKING:
     from .._http import HTTPClient
 
-_POLL_STATUSES = {"pending", "processing", "running", "in_progress", "queued"}
-_TERMINAL_FAILURES = {"failed", "cancelled", "expired"}
+_TERMINAL_SUCCESS = {"completed", "succeeded", "success", "done", "finished"}
+_TERMINAL_FAILURES = {"failed", "cancelled", "canceled", "expired", "rejected", "error"}
+# Only known terminal states end the poll. Treating everything unknown as
+# "done" meant a new server-side status (say "starting") would make wait()
+# return instantly with no result and no error.
+_TERMINAL_STATUSES = _TERMINAL_SUCCESS | _TERMINAL_FAILURES
+
+
+def _unwrap(payload: dict[str, Any]) -> dict[str, Any]:
+    """Flatten the {"data": {...}} envelope this API sometimes uses."""
+    data = payload.get("data")
+    if isinstance(data, dict):
+        return {**payload, **data}
+    return payload
 
 
 def _validate_public_url(value: str) -> str:
@@ -72,18 +84,23 @@ class ImageReference(BaseModel):
 class VideoTask:
     def __init__(self, http: HTTPClient, payload: dict[str, Any]) -> None:
         self._http = http
-        self.id: str = payload.get("id", "")
-        self.status: str = payload.get("status", "pending")
-        self.polling_url: str | None = payload.get("polling_url")
-        self.raw = payload
+        unwrapped = _unwrap(payload)
+        self.id: str = str(unwrapped.get("id") or "")
+        self.status: str = unwrapped.get("status", "pending")
+        self.polling_url: str | None = unwrapped.get("polling_url")
+        self.raw = unwrapped
         self._apply(payload)
 
     def _apply(self, payload: dict[str, Any]) -> None:
+        # Unwrap the {"data": {...}} envelope once, for every field. Reading it
+        # only for usage left id and status empty whenever the API wrapped the
+        # response, which made the task impossible to poll.
+        payload = _unwrap(payload)
         self.status = payload.get("status", self.status)
         self.raw = payload
+        if not self.id:
+            self.id = str(payload.get("id") or "")
         usage_payload = payload.get("usage")
-        if usage_payload is None and isinstance(payload.get("data"), dict):
-            usage_payload = payload["data"].get("usage")
         self._usage = (
             Usage.model_validate(usage_payload) if isinstance(usage_payload, dict) else None
         )
@@ -126,11 +143,11 @@ class VideoTask:
 
     @property
     def done(self) -> bool:
-        return self.status not in _POLL_STATUSES
+        return self.status.strip().lower() in _TERMINAL_STATUSES
 
     @property
     def failed(self) -> bool:
-        return self.status in _TERMINAL_FAILURES
+        return self.status.strip().lower() in _TERMINAL_FAILURES
 
     def content(self, *, index: int = 0, timeout: float | None = None) -> bytes:
         """Download one generated video (``GET /videos/{id}/content?index=N``)."""

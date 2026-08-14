@@ -89,16 +89,17 @@ def test_owned_clients_closed(respx_mock):
     assert not sync_client.is_closed
     client.close()
     assert sync_client.is_closed
-    assert client._http._sync_client is None
+    # closing the sync side must not resurrect it on the next call
+    with pytest.raises(RuntimeError, match="closed"):
+        client.models.all(force_refresh=True)
 
-    client.models.clear_cache()  # force the async path to hit the network
+    client.models.clear_cache()  # the async side is still usable
     asyncio.run(client.models.aall())
     async_client = client._http._async_client
     assert async_client is not None
     assert not async_client.is_closed
     asyncio.run(client.aclose())
     assert async_client.is_closed
-    assert client._http._async_client is None
 
 
 # --- STREAM-01: streaming lifecycle ---

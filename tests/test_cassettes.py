@@ -11,7 +11,10 @@ XPASS — сигнал снять маркер.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
+import time
 from decimal import Decimal
 
 import pytest
@@ -298,3 +301,44 @@ def test_stream_keepalive_with_empty_data_field_is_skipped():
     )
     assert "".join(c.content for c in client.chat.stream("m", "hi")) == "ок"
     client.close()
+
+
+def test_path_segments_are_escaped():
+    """An id from an outside source must not walk out of /api/v1."""
+    import httpx
+
+    from routerai import RouterAI
+
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(200, json={"data": {}}, headers={"content-type": "application/json"})
+
+    client = RouterAI(
+        api_key="sk-cassette",
+        max_retries=0,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    client.keys.delete("../../v1/team/members/999")
+    # the request stays under /api/v1/keys/ instead of walking to another endpoint
+    assert seen[0].startswith("https://routerai.ru/api/v1/keys/")
+    assert "%2E%2E" in seen[0]
+    client.close()
+
+
+def test_webhook_rejects_a_signature_it_cannot_compare():
+    """The signature header is unauthenticated input: it must not crash the handler."""
+    from routerai.webhooks import WebhookVerificationError, signing_secret, verify_video
+
+    body = b'{"task_id":"t1","status":"completed"}'
+    stamp = str(int(time.time()))
+    with pytest.raises(WebhookVerificationError):
+        verify_video(body, "подпись-кириллицей", "sk-test", stamp)
+
+    good = hmac.new(
+        signing_secret("sk-test").encode("ascii"),
+        stamp.encode() + b"." + body,
+        hashlib.sha256,
+    ).hexdigest()
+    assert verify_video(body, good, "sk-test", stamp)["task_id"] == "t1"
