@@ -116,7 +116,11 @@ from routerai.webhooks import verify_video
 # framework's own header mapping already does this for you.
 signature = request.headers["X-RouterAI-Signature"]
 timestamp = request.headers["X-RouterAI-Timestamp"]
-data = verify_video(raw_body, signature, api_key, timestamp, max_age_seconds=300)
+event = verify_video(raw_body, signature, api_key, timestamp, max_age_seconds=300)
+
+event["type"]             # "video.completed" or "video.generation.failed"
+event["data"]["status"]   # the payload lives under "data"
+event["data"]["unsigned_urls"]
 ```
 
 A bad signature raises `WebhookVerificationError`, including when the header

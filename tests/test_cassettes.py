@@ -26,7 +26,7 @@ from routerai import (
     RateLimitError,
     StreamAccumulator,
 )
-from routerai.errors import ModelNotFoundError
+from routerai.errors import ModelNotFoundError, VideoGenerationError
 from routerai.schemas import ModelPricing, Usage
 
 from .cassettes import acassette_client, cassette_client, load
@@ -647,4 +647,39 @@ def test_sync_and_async_agree_on_a_missed_deadline():
     video = VideoTask(client._http, {"id": "t1", "status": "processing"})
     with pytest.raises(DeadlineExceededError):
         video.refresh(deadline=time.monotonic() + 0.05)
+    client.close()
+
+
+def test_video_creation_answers_202_with_a_flat_body():
+    """Recorded from the live API: no data envelope, and 202 is a success."""
+    client = cassette_client("video_task_created")
+    task = client.videos.create("bytedance/seedance-2.0-mini", "тест", duration=4)
+    assert task.id == "8NnkHVnoPapWvgOPCp5z"
+    assert task.status == "pending"
+    assert not task.done
+    client.close()
+
+
+def test_failed_video_task_stays_reachable():
+    """The live API reports a failed generation as HTTP 200 with an `error` field.
+
+    Under the general rule that would be an APIStatusError and the task object
+    would be unreachable — which is why polling opts out of it.
+    """
+    client = cassette_client("video_task_failed")
+    task = client.videos.get("HydzUxrmRAxHGMNi8DgD")
+    assert task.status == "failed"
+    assert task.failed
+    assert "copyright" in str(task.error)
+    with pytest.raises(VideoGenerationError):
+        task.wait(timeout=1, interval=0.01, raise_on_failure=True)
+    client.close()
+
+
+def test_completed_video_task_reports_urls_and_cost():
+    client = cassette_client("video_task_completed")
+    task = client.videos.get("8NnkHVnoPapWvgOPCp5z")
+    assert task.done and not task.failed
+    assert task.urls == ["https://routerai.ru/api/v1/videos/8NnkHVnoPapWvgOPCp5z/content?index=0"]
+    assert task.cost_rub == Decimal("6.191663014264")
     client.close()

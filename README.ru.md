@@ -120,7 +120,11 @@ from routerai.webhooks import verify_video
 # доступ к заголовкам во фреймворках это уже учитывает.
 signature = request.headers["X-RouterAI-Signature"]
 timestamp = request.headers["X-RouterAI-Timestamp"]
-data = verify_video(raw_body, signature, api_key, timestamp, max_age_seconds=300)
+event = verify_video(raw_body, signature, api_key, timestamp, max_age_seconds=300)
+
+event["type"]             # "video.completed" или "video.generation.failed"
+event["data"]["status"]   # полезная нагрузка лежит под ключом "data"
+event["data"]["unsigned_urls"]
 ```
 
 Неверная подпись поднимает `WebhookVerificationError` — в том числе когда в

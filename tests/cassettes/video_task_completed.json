@@ -1,0 +1,16 @@
+{
+  "name": "video_task_completed",
+  "note": "Опрос завершённой генерации: статус completed, ссылки и стоимость",
+  "finding": "15",
+  "recorded_from": "https://routerai.ru/api/v1",
+  "request": {
+    "method": "GET",
+    "path": "/videos/8NnkHVnoPapWvgOPCp5z",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "content_type": "application/json",
+    "body": "{\"id\": \"8NnkHVnoPapWvgOPCp5z\", \"status\": \"completed\", \"generation_id\": \"rai-vid-1786740502-lW1LpTKstqeVjhtTSer0\", \"usage\": {\"cost\": 6.191663014264}, \"unsigned_urls\": [\"https://routerai.ru/api/v1/videos/8NnkHVnoPapWvgOPCp5z/content?index=0\"]}"
+  }
+}
