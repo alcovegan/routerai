@@ -17,8 +17,11 @@ jobs:
       - uses: astral-sh/setup-uv@v7
       - run: uv sync --locked --extra dev
       - name: Verify tag matches package version
+        # Read it from the package: the version is dynamic (hatch takes it from
+        # src/routerai/_version.py), and `uv version` cannot read those.
         run: |
-          package_version=$(uv version --short)
+          package_version=$(uv run python -c "import routerai; print(routerai.__version__)")
+          echo "package=${package_version} tag=${GITHUB_REF_NAME}"
           test "v${package_version}" = "${GITHUB_REF_NAME}"
       - run: uv run ruff check src tests
       - run: uv run ruff format --check src tests
