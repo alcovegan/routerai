@@ -6,7 +6,12 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.3.0] - 2026-08-14
+## [0.3.0] - 2026-08-16
+
+First published as `0.3.0rc1`. Versions 0.2.0 and 0.3.0 were developed
+together after an audit of the SDK against the live API; 0.2.0 is described
+separately below because its changes are breaking and worth reading on their
+own, but it was never released to PyPI.
 
 ### Added
 
@@ -45,7 +50,7 @@ project follows [Semantic Versioning](https://semver.org/).
 - The package version lives in `routerai/_version.py`; hatch reads it from
   there, so it is no longer duplicated in `pyproject.toml`.
 
-## [0.2.0] - 2026-08-14
+## [0.2.0] - 2026-08-16
 
 Everything below was found by auditing the SDK against the live API and is
 covered by tests over recorded responses in `tests/cassettes/`.
