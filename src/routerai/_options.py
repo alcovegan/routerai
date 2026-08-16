@@ -6,14 +6,23 @@ still reads as plain keyword arguments::
 
     client.chat.complete(model, prompt, timeout=10, max_retries=0)
 
-``Unpack`` is only needed by type checkers, and every module in the package
-uses ``from __future__ import annotations``, so nothing is imported at runtime.
+``Unpack`` is imported for real, not only under TYPE_CHECKING: otherwise
+``typing.get_type_hints()`` on any public method raises NameError, which breaks
+FastAPI, sphinx and anything else that resolves annotations at runtime.
 """
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Mapping
 from typing import TypedDict
+
+if sys.version_info >= (3, 11):  # pragma: no cover - version split
+    from typing import Unpack
+else:  # pragma: no cover - version split
+    from typing_extensions import Unpack
+
+__all__ = ["OPTION_KEYS", "RequestOptions", "Unpack"]
 
 
 class RequestOptions(TypedDict, total=False):

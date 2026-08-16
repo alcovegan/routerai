@@ -3,12 +3,10 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
-from .._options import RequestOptions
+from .._options import RequestOptions, Unpack
 from ..schemas import GenerationInfo
 
 if TYPE_CHECKING:
-    from typing_extensions import Unpack
-
     from .._http import HTTPClient
 
 

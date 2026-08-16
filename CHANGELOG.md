@@ -31,6 +31,13 @@ project follows [Semantic Versioning](https://semver.org/).
   so an abandoned async stream releases its connection immediately instead of
   waiting for the loop to shut down its async generators.
 
+### Fixed
+
+- `typing.get_type_hints()` works on the public methods again. Unpack was
+  imported only under TYPE_CHECKING, so on Python 3.10 resolving annotations
+  raised NameError — which breaks FastAPI, sphinx and anything else that reads
+  annotations at runtime. `typing-extensions` is now a dependency below 3.11.
+
 ### Changed
 
 - Opening a stream is logged at DEBUG; the INFO line is written when the stream

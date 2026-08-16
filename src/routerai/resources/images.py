@@ -11,13 +11,11 @@ import httpx
 
 from .._errors import DONE_MARKER, parse_stream_event
 from .._extras import merge_extra
-from .._options import RequestOptions
+from .._options import RequestOptions, Unpack
 from ..errors import RequestError, RouterAIError, StreamInterruptedError
 from ..schemas import Usage
 
 if TYPE_CHECKING:
-    from typing_extensions import Unpack
-
     from .._http import HTTPClient
 
 

@@ -23,6 +23,8 @@ classifiers = [
 dependencies = [
     "httpx>=0.27,<1",
     "pydantic>=2.8,<3",
+    # Unpack landed in typing on 3.11; annotations must resolve at runtime.
+    "typing-extensions>=4.6; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]

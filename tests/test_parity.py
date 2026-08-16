@@ -67,3 +67,18 @@ def test_every_public_resource_method_has_an_async_twin() -> None:
 def test_client_closes_both_sides() -> None:
     client = RouterAI(api_key="sk-parity")
     assert hasattr(client, "close") and hasattr(client, "aclose")
+
+
+def test_annotations_resolve_at_runtime() -> None:
+    """get_type_hints must work: FastAPI, sphinx and pydantic resolve annotations.
+
+    Importing Unpack only under TYPE_CHECKING made this raise NameError on
+    Python 3.10, where Unpack is not yet in typing.
+    """
+    import typing
+
+    for cls in RESOURCES:
+        for name, value in vars(cls).items():
+            if name.startswith("_") or not callable(value):
+                continue
+            typing.get_type_hints(value)

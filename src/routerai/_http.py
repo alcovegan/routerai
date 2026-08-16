@@ -11,13 +11,13 @@ from contextlib import asynccontextmanager, contextmanager, suppress
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from json import loads as _json_loads
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from urllib.parse import quote
 
 import httpx
 
 from ._errors import build_error
-from ._options import RequestOptions
+from ._options import RequestOptions, Unpack
 from ._version import __version__
 from .errors import (
     APIConnectionError,
@@ -29,9 +29,6 @@ from .errors import (
 )
 from .logging import log_request, mask_key
 from .usage import UsageHook, UsageTracker, record_from
-
-if TYPE_CHECKING:
-    from typing_extensions import Unpack
 
 DEFAULT_BASE_URL = "https://routerai.ru/api/v1"
 DEFAULT_TIMEOUT = 60.0

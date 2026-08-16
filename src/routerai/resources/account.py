@@ -3,11 +3,9 @@ from __future__ import annotations
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
-from .._options import RequestOptions
+from .._options import RequestOptions, Unpack
 
 if TYPE_CHECKING:
-    from typing_extensions import Unpack
-
     from .._http import HTTPClient
 
 

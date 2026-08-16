@@ -13,7 +13,7 @@ from pydantic import BaseModel, ValidationError
 
 from .._errors import DONE_MARKER, parse_stream_event
 from .._extras import merge_extra as _merge_extra
-from .._options import RequestOptions
+from .._options import RequestOptions, Unpack
 from ..errors import ResponseParsingError, RouterAIError, StreamInterruptedError
 from ..schemas import ChatResult, ProviderSelection, ServiceTier, ToolCall, Usage
 from ..tools import (
@@ -27,8 +27,6 @@ from ..tools import (
 )
 
 if TYPE_CHECKING:
-    from typing_extensions import Unpack
-
     from .._http import HTTPClient
 
 MessageInput = dict[str, Any]

@@ -7,13 +7,11 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from .._extras import merge_extra
-from .._options import RequestOptions
+from .._options import RequestOptions, Unpack
 from ..errors import ResponseParsingError
 from ..schemas import Usage
 
 if TYPE_CHECKING:
-    from typing_extensions import Unpack
-
     from .._http import HTTPClient
 
 
