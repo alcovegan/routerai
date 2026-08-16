@@ -1,0 +1,20 @@
+{
+  "name": "embeddings_base64",
+  "note": "Эмбеддинги строкой base64 — SDK превращает её в список отдельных символов",
+  "finding": "L4",
+  "recorded_from": "https://routerai.ru/api/v1",
+  "request": {
+    "method": "POST",
+    "path": "/embeddings",
+    "body": {
+      "model": "perplexity/pplx-embed-v1-0.6B",
+      "input": "привет",
+      "encoding_format": "base64"
+    }
+  },
+  "response": {
+    "status": 200,
+    "content_type": "application/json",
+    "body": "{\"object\": \"list\", \"data\": [{\"object\": \"embedding\", \"embedding\": \"AACUvgAA1L4AAAAAAABgvgAAMj8AAHA+AADAPQAAHj8AADC/AAD4vgAAYL4AAPi+AAAAAAAAAAAAADi+AADwvQAAAL4AACA9\", \"index\": 0}], \"model\": \"pplx-embed-v1-0.6b\", \"usage\": {\"total_tokens\": 3, \"prompt_tokens\": 3}, \"provider\": \"Perplexity\", \"id\": \"rai-emb-1786734024-twadkmSMrrRfIGCZkbPQ\"}"
+  }
+}

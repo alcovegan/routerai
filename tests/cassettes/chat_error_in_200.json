@@ -1,0 +1,25 @@
+{
+  "name": "chat_error_in_200",
+  "note": "Ошибка валидации приходит внутри HTTP 200: настоящий код 400 закопан в строковом поле error",
+  "finding": "L1, 06",
+  "recorded_from": "https://routerai.ru/api/v1",
+  "request": {
+    "method": "POST",
+    "path": "/chat/completions",
+    "body": {
+      "model": "inclusionai/ling-2.6-flash",
+      "messages": [
+        {
+          "role": "user",
+          "content": "hi"
+        }
+      ],
+      "max_tokens": -5
+    }
+  },
+  "response": {
+    "status": 200,
+    "content_type": "application/json",
+    "body": "\n         \n{\"error\":\"{\\\"error\\\":{\\\"message\\\":\\\"Expected max_tokens to be at least 1\\\",\\\"code\\\":400,\\\"metadata\\\":{\\\"provider_name\\\":null}},\\\"user_id\\\":\\\"user_3Cnz63armY2yRZltI7QrmVM59mm\\\"}\"}"
+  }
+}

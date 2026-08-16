@@ -10,3 +10,6 @@ build/
 .coverage
 htmlcov/
 .env
+.DS_Store
+codex-review*.md
+artifacts/

@@ -1,9 +1,15 @@
+from ._version import __version__
 from .client import RouterAI
 from .errors import (
+    APIConnectionError,
     APIStatusError,
+    APITimeoutError,
     AuthenticationError,
+    BadRequestError,
     ConfigurationError,
+    ConflictError,
     DeadlineExceededError,
+    ErrorInfo,
     InsufficientFundsError,
     ModelNotFoundError,
     NoProviderError,
@@ -11,19 +17,34 @@ from .errors import (
     PermissionDeniedError,
     RateLimitError,
     RequestError,
+    ResponseParsingError,
     RouterAIError,
+    ServerError,
     StreamInterruptedError,
+    UnprocessableEntityError,
     VideoGenerationError,
     WebhookVerificationError,
 )
 from .registry import Registry
-from .resources.chat import AudioDelta, StreamAccumulator
-from .resources.videos import FrameImage, ImageReference
+from .resources.audio import SpeechResult, TranscriptionResult
+from .resources.chat import (
+    AsyncChatStream,
+    AudioDelta,
+    ChatStream,
+    ParsedResult,
+    StreamAccumulator,
+    StreamChunk,
+)
+from .resources.completions import CompletionChoice, CompletionsResult
+from .resources.embeddings import EmbeddingsResult, RerankResult
+from .resources.images import GeneratedImage, ImageResult, ImageStreamChunk
+from .resources.videos import FrameImage, ImageReference, VideoTask
 from .schemas import (
     Architecture,
     Capability,
     ChatResult,
     Endpoint,
+    GenerationInfo,
     KeyInfo,
     MemberCreation,
     MessagesResult,
@@ -38,27 +59,36 @@ from .schemas import (
     ToolCall,
     Usage,
 )
-
-__version__: str
-try:
-    from importlib.metadata import version
-
-    __version__ = version("routerai")
-except Exception:  # pragma: no cover - source checkout without installed metadata
-    __version__ = "0.1.1"
+from .tools import ToolRun, ToolRunResult, tool_schema
+from .usage import UsageRecord, UsageStats, UsageTracker
+from .webhooks import signing_secret, verify_video
 
 __all__ = [
+    "APIConnectionError",
     "APIStatusError",
+    "APITimeoutError",
     "Architecture",
+    "AsyncChatStream",
     "AudioDelta",
     "AuthenticationError",
+    "BadRequestError",
     "Capability",
     "ChatResult",
+    "ChatStream",
+    "CompletionChoice",
+    "CompletionsResult",
     "ConfigurationError",
+    "ConflictError",
     "DeadlineExceededError",
+    "EmbeddingsResult",
     "Endpoint",
+    "ErrorInfo",
     "FrameImage",
+    "GeneratedImage",
+    "GenerationInfo",
     "ImageReference",
+    "ImageResult",
+    "ImageStreamChunk",
     "InsufficientFundsError",
     "KeyInfo",
     "MemberCreation",
@@ -69,22 +99,39 @@ __all__ = [
     "ModelPricing",
     "NoProviderError",
     "NotFoundError",
+    "ParsedResult",
     "PermissionDeniedError",
     "ProviderSelection",
     "RateLimitError",
     "Registry",
     "RequestError",
+    "RerankResult",
+    "ResponseParsingError",
     "ResponsesResult",
     "RouterAI",
     "RouterAIError",
+    "ServerError",
     "ServiceTier",
+    "SpeechResult",
     "StreamAccumulator",
+    "StreamChunk",
     "StreamInterruptedError",
     "TeamInvitation",
     "TeamMember",
     "ToolCall",
+    "ToolRun",
+    "ToolRunResult",
+    "TranscriptionResult",
+    "UnprocessableEntityError",
     "Usage",
+    "UsageRecord",
+    "UsageStats",
+    "UsageTracker",
     "VideoGenerationError",
+    "VideoTask",
     "WebhookVerificationError",
     "__version__",
+    "signing_secret",
+    "tool_schema",
+    "verify_video",
 ]

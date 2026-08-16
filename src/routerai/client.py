@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from typing import Any
 
 import httpx
@@ -19,6 +21,7 @@ from .resources.keys import Keys
 from .resources.models import Models
 from .resources.team import Team
 from .resources.videos import Videos
+from .usage import UsageHook, UsageTracker
 
 ENV_API_KEY = "ROUTERAI_API_KEY"
 ENV_BASE_URL = "ROUTERAI_BASE_URL"
@@ -46,6 +49,9 @@ class RouterAI:
             unless owned). The same instance may be used for sync and async
             calls; transports are kept in separate slots.
         async_http_client: optional async httpx transport.
+        default_headers: headers added to every request (an application can
+            identify itself, e.g. ``{"X-Title": "my-app"}``).
+        app_info: appended to the SDK User-Agent, e.g. ``"my-app/1.2"``.
 
     Resource namespaces: ``chat``, ``models``, ``completions``, ``responses``,
     ``messages``, ``images``, ``videos``, ``audio``, ``embeddings``,
@@ -66,6 +72,8 @@ class RouterAI:
         models_ttl: float = 600.0,
         http_client: httpx.Client | None = None,
         async_http_client: httpx.AsyncClient | None = None,
+        default_headers: Mapping[str, str] | None = None,
+        app_info: str | None = None,
     ) -> None:
         api_key = api_key if api_key is not None else os.getenv(ENV_API_KEY)
         if api_key is not None and not api_key.strip():
@@ -86,6 +94,8 @@ class RouterAI:
             logger=logger,
             http_client=http_client,
             async_http_client=async_http_client,
+            default_headers=dict(default_headers) if default_headers else None,
+            app_info=app_info,
         )
         self.chat = Chat(self._http)
         self.models = Models(self._http, ttl=models_ttl)
@@ -105,6 +115,29 @@ class RouterAI:
     @property
     def logger(self) -> logging.Logger:
         return self._http.logger
+
+    @property
+    def usage(self) -> UsageTracker:
+        """Running totals for this client: requests, tokens and rubles."""
+        return self._http.usage
+
+    @contextmanager
+    def track(self, label: str | None = None) -> Iterator[UsageTracker]:
+        """Count what the calls inside this block cost.
+
+        Tasks started inside the block share the tracker; a task started before
+        it will not be counted, because the context was copied without it.
+        """
+        tracker = UsageTracker(label=label)
+        token = self._http.push_tracker(tracker)
+        try:
+            yield tracker
+        finally:
+            self._http.pop_tracker(token)
+
+    def on_usage(self, hook: UsageHook) -> Callable[[], None]:
+        """Call ``hook`` after every request; returns an unsubscribe callable."""
+        return self._http.on_usage(hook)
 
     def close(self) -> None:
         self._http.close()

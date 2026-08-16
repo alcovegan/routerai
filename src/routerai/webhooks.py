@@ -63,12 +63,16 @@ def verify_video(
         )
 
     body_bytes = raw_body if isinstance(raw_body, bytes) else raw_body.encode("utf-8")
+    # Sign the header exactly as it arrived: int() would normalise "1_700" or
+    # leading zeros into a different number and the digest would never match.
     expected = hmac.new(
         signing_secret(api_key).encode("ascii"),
-        f"{ts}.".encode("ascii") + body_bytes,
+        timestamp.strip().encode("utf-8") + b"." + body_bytes,
         hashlib.sha256,
     ).hexdigest()
-    if not hmac.compare_digest(expected, signature):
+    # Compare bytes: compare_digest raises TypeError on non-ASCII text, and
+    # the signature header is attacker-controlled and unauthenticated here.
+    if not hmac.compare_digest(expected.encode("ascii"), signature.strip().encode("utf-8")):
         raise WebhookVerificationError("webhook signature mismatch")
 
     try:

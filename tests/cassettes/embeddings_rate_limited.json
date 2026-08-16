@@ -1,0 +1,22 @@
+{
+  "name": "embeddings_rate_limited",
+  "note": "HTTP 503, внутри которого настоящий код 429",
+  "finding": "L1",
+  "recorded_from": "https://routerai.ru/api/v1",
+  "request": {
+    "method": "POST",
+    "path": "/embeddings",
+    "body": {
+      "model": "perplexity/pplx-embed-v1-0.6B",
+      "input": [
+        "привет",
+        "hello"
+      ]
+    }
+  },
+  "response": {
+    "status": 503,
+    "content_type": "application/json",
+    "body": "{\"error\":\"{\\\"error\\\":{\\\"message\\\":\\\"HTTP 429: {\\\\\\\"error\\\\\\\":{\\\\\\\"message\\\\\\\":\\\\\\\"Rate limit exceeded, please try again later.\\\\\\\",\\\\\\\"type\\\\\\\":\\\\\\\"request_rate_limit_exceeded\\\\\\\",\\\\\\\"code\\\\\\\":429}}\\\",\\\"code\\\":429}}\"}"
+  }
+}

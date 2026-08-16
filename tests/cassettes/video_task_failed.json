@@ -1,0 +1,16 @@
+{
+  "name": "video_task_failed",
+  "note": "Опрос провалившейся генерации: HTTP 200 с полем error. Именно этот ответ раньше превращался в APIStatusError, из-за чего объект задачи был недостижим",
+  "finding": "05",
+  "recorded_from": "https://routerai.ru/api/v1",
+  "request": {
+    "method": "GET",
+    "path": "/videos/HydzUxrmRAxHGMNi8DgD",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "content_type": "application/json",
+    "body": "{\"error\": \"The request failed because the output audio may be related to copyright restrictions. Request id: 02178674033115500000000000000000000ffffc0a8b367\", \"generation_id\": \"rai-vid-1786740329-X1dSM6yX9pZitygM8nES\", \"id\": \"HydzUxrmRAxHGMNi8DgD\", \"polling_url\": \"https://routerai.ru/api/v1/videos/HydzUxrmRAxHGMNi8DgD\", \"status\": \"failed\"}"
+  }
+}

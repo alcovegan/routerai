@@ -1,0 +1,26 @@
+{
+  "name": "chat_stream_provider_error",
+  "note": "Лимит провайдера: HTTP 200, SSE, поле error строкой, внутри код 429",
+  "finding": "L1, 05, 06",
+  "recorded_from": "https://routerai.ru/api/v1",
+  "request": {
+    "method": "POST",
+    "path": "/chat/completions",
+    "body": {
+      "model": "inclusionai/ling-2.6-flash",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Посчитай от одного до пяти."
+        }
+      ],
+      "max_tokens": 40,
+      "stream": true
+    }
+  },
+  "response": {
+    "status": 200,
+    "content_type": "text/event-stream",
+    "body": ": PROCESSING\n\ndata: {\"error\":\"{\\\"error\\\":{\\\"message\\\":\\\"Provider returned error\\\",\\\"code\\\":429,\\\"metadata\\\":{\\\"raw\\\":\\\"inclusionai/ling-2.6-flash is temporarily rate-limited upstream. Please retry shortly, or add your own key to accumulate your rate limits: https://openrouter.ai/settings/integrations\\\",\\\"provider_name\\\":\\\"Novita\\\",\\\"is_byok\\\":false,\\\"limit_source\\\":\\\"upstream_provider_shared_pool\\\",\\\"remedy_hint\\\":\\\"Retry shortly, add your own provider key (https://openrouter.ai/settings/integrations), or route to another provider with provider routing: https://openrouter.ai/docs/features/provider-routing\\\"}},\\\"user_id\\\":\\\"user_3Cnz63armY2yRZltI7QrmVM59mm\\\"}\"}\n\ndata: [DONE]\n\n"
+  }
+}

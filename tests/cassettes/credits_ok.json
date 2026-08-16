@@ -1,0 +1,16 @@
+{
+  "name": "credits_ok",
+  "note": "Баланс: ответ без конверта data",
+  "finding": "04",
+  "recorded_from": "https://routerai.ru/api/v1",
+  "request": {
+    "method": "GET",
+    "path": "/credits",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "content_type": "application/json",
+    "body": "{\"data\":{\"credits\":170.42180052356514}}"
+  }
+}

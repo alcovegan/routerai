@@ -3,6 +3,8 @@ from __future__ import annotations
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
+from .._options import RequestOptions, Unpack
+
 if TYPE_CHECKING:
     from .._http import HTTPClient
 
@@ -13,12 +15,12 @@ class Account:
     def __init__(self, http: HTTPClient) -> None:
         self._http = http
 
-    def credits(self) -> Decimal:
+    def credits(self, **opts: Unpack[RequestOptions]) -> Decimal:
         """Return the current balance in rubles (``GET /api/v1/credits``)."""
-        return self._parse(self._http._json(self._http.get("credits")))
+        return self._parse(self._http._json(self._http.get("credits", **opts)))
 
-    async def acredits(self) -> Decimal:
-        return self._parse(self._http._json(await self._http.aget("credits")))
+    async def acredits(self, **opts: Unpack[RequestOptions]) -> Decimal:
+        return self._parse(self._http._json(await self._http.aget("credits", **opts)))
 
     @staticmethod
     def _parse(payload: dict[str, Any]) -> Decimal:

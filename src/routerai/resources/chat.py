@@ -2,16 +2,29 @@ from __future__ import annotations
 
 import base64
 import binascii
+import inspect
 import json
-from collections.abc import AsyncIterator, Iterator, Sequence
+from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 import httpx
+from pydantic import BaseModel, ValidationError
 
+from .._errors import DONE_MARKER, parse_stream_event
 from .._extras import merge_extra as _merge_extra
-from ..errors import APIStatusError, RouterAIError, StreamInterruptedError
-from ..schemas import ChatResult, ProviderSelection, ServiceTier, Usage
+from .._options import RequestOptions, Unpack
+from ..errors import ResponseParsingError, RouterAIError, StreamInterruptedError
+from ..schemas import ChatResult, ProviderSelection, ServiceTier, ToolCall, Usage
+from ..tools import (
+    ToolFunction,
+    ToolRun,
+    ToolRunResult,
+    assistant_message,
+    normalize_tools,
+    parse_arguments,
+    tool_message,
+)
 
 if TYPE_CHECKING:
     from .._http import HTTPClient
@@ -79,6 +92,7 @@ class Chat:
         provider: ProviderSelection | dict[str, Any] | None = None,
         stop: list[str] | None = None,
         extra: dict[str, Any] | None = None,
+        **opts: Unpack[RequestOptions],
     ) -> ChatResult:
         """Send a chat completion request and return a parsed result.
 
@@ -100,7 +114,7 @@ class Chat:
             stop=stop,
             extra=extra,
         )
-        response = self._http.post("chat/completions", json=body)
+        response = self._http.post("chat/completions", json=body, **opts)
         generation_id = response.generation_id
         return ChatResult.from_response(response.json(), generation_id=generation_id)
 
@@ -120,6 +134,7 @@ class Chat:
         provider: ProviderSelection | dict[str, Any] | None = None,
         stop: list[str] | None = None,
         extra: dict[str, Any] | None = None,
+        **opts: Unpack[RequestOptions],
     ) -> ChatResult:
         body = self._build_body(
             model,
@@ -136,7 +151,7 @@ class Chat:
             stop=stop,
             extra=extra,
         )
-        response = await self._http.apost("chat/completions", json=body)
+        response = await self._http.apost("chat/completions", json=body, **opts)
         generation_id = response.generation_id
         return ChatResult.from_response(response.json(), generation_id=generation_id)
 
@@ -185,6 +200,142 @@ class Chat:
             body.update(extra)
         return body
 
+    def parse(
+        self,
+        model: str,
+        prompt: str | Sequence[MessageInput],
+        *,
+        response_model: type[BaseModel],
+        system: str | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        extra: dict[str, Any] | None = None,
+        **opts: Unpack[RequestOptions],
+    ) -> ParsedResult[Any]:
+        """Ask for a structured answer and validate it against ``response_model``.
+
+        The JSON schema is derived from the model, so the shape asked for and
+        the shape validated cannot drift apart.
+        """
+        result = self.complete(
+            model,
+            prompt,
+            system=system,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            response_format=_json_schema_format(response_model),
+            extra=extra,
+            **opts,
+        )
+        return ParsedResult(result, _validate_parsed(result, response_model))
+
+    async def aparse(
+        self,
+        model: str,
+        prompt: str | Sequence[MessageInput],
+        *,
+        response_model: type[BaseModel],
+        system: str | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        extra: dict[str, Any] | None = None,
+        **opts: Unpack[RequestOptions],
+    ) -> ParsedResult[Any]:
+        result = await self.acomplete(
+            model,
+            prompt,
+            system=system,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            response_format=_json_schema_format(response_model),
+            extra=extra,
+            **opts,
+        )
+        return ParsedResult(result, _validate_parsed(result, response_model))
+
+    def run_tools(
+        self,
+        model: str,
+        prompt: str | Sequence[MessageInput],
+        *,
+        tools: Sequence[ToolFunction | dict[str, Any]] | Mapping[str, ToolFunction],
+        system: str | None = None,
+        max_turns: int = 5,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        extra: dict[str, Any] | None = None,
+        **opts: Unpack[RequestOptions],
+    ) -> ToolRunResult:
+        """Answer the prompt, running any tools the model asks for.
+
+        Loops model → function → model until the model stops asking, or until
+        ``max_turns`` is reached; the last result is returned either way, so a
+        model stuck in a loop costs a bounded amount of money.
+        """
+        schemas, registry = normalize_tools(tools)
+        messages = _messages(prompt, system)
+        runs: list[ToolRun] = []
+
+        for turn in range(1, max_turns + 1):
+            result = self.complete(
+                model,
+                messages,
+                tools=schemas,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                extra=extra,
+                **opts,
+            )
+            if not result.tool_calls:
+                return ToolRunResult(result, runs, messages, turn)
+            messages.append(assistant_message(result))
+            for call in result.tool_calls:
+                run = _execute(call, registry)
+                runs.append(run)
+                messages.append(
+                    tool_message(call.id, run.name, run.error if run.error else run.result)
+                )
+        return ToolRunResult(result, runs, messages, max_turns)
+
+    async def arun_tools(
+        self,
+        model: str,
+        prompt: str | Sequence[MessageInput],
+        *,
+        tools: Sequence[ToolFunction | dict[str, Any]] | Mapping[str, ToolFunction],
+        system: str | None = None,
+        max_turns: int = 5,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        extra: dict[str, Any] | None = None,
+        **opts: Unpack[RequestOptions],
+    ) -> ToolRunResult:
+        """Async :meth:`run_tools`; async tool functions are awaited."""
+        schemas, registry = normalize_tools(tools)
+        messages = _messages(prompt, system)
+        runs: list[ToolRun] = []
+
+        for turn in range(1, max_turns + 1):
+            result = await self.acomplete(
+                model,
+                messages,
+                tools=schemas,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                extra=extra,
+                **opts,
+            )
+            if not result.tool_calls:
+                return ToolRunResult(result, runs, messages, turn)
+            messages.append(assistant_message(result))
+            for call in result.tool_calls:
+                run = await _aexecute(call, registry)
+                runs.append(run)
+                messages.append(
+                    tool_message(call.id, run.name, run.error if run.error else run.result)
+                )
+        return ToolRunResult(result, runs, messages, max_turns)
+
     # --- streaming ---
 
     def stream(
@@ -198,11 +349,13 @@ class Chat:
         top_p: float | None = None,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: Any = None,
+        response_format: dict[str, Any] | None = None,
         service_tier: ServiceTier | str | None = None,
         provider: ProviderSelection | dict[str, Any] | None = None,
         stop: list[str] | None = None,
         extra: dict[str, Any] | None = None,
-    ) -> Iterator[StreamChunk]:
+        **opts: Unpack[RequestOptions],
+    ) -> ChatStream:
         body = self._build_body(
             model,
             prompt,
@@ -212,21 +365,24 @@ class Chat:
             top_p=top_p,
             tools=tools,
             tool_choice=tool_choice,
-            response_format=None,
+            response_format=response_format,
             service_tier=service_tier,
             provider=provider,
             stop=stop,
             extra=extra,
         )
         body["stream"] = True
-        with self._http.stream_request("POST", "chat/completions", json=body) as response:
+        return ChatStream(self._stream_chunks(body, opts))
+
+    def _stream_chunks(self, body: dict[str, Any], opts: RequestOptions) -> Iterator[StreamChunk]:
+        with self._http.stream_request("POST", "chat/completions", json=body, **opts) as response:
             yield from _iter_sse(
                 response,
                 http=self._http,
-                generation_id=response.headers.get("X-Generation-Id"),
+                generation_id=response.generation_id,
             )
 
-    async def astream(
+    def astream(
         self,
         model: str,
         prompt: str | Sequence[MessageInput],
@@ -237,11 +393,13 @@ class Chat:
         top_p: float | None = None,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: Any = None,
+        response_format: dict[str, Any] | None = None,
         service_tier: ServiceTier | str | None = None,
         provider: ProviderSelection | dict[str, Any] | None = None,
         stop: list[str] | None = None,
         extra: dict[str, Any] | None = None,
-    ) -> AsyncIterator[StreamChunk]:
+        **opts: Unpack[RequestOptions],
+    ) -> AsyncChatStream:
         body = self._build_body(
             model,
             prompt,
@@ -251,20 +409,171 @@ class Chat:
             top_p=top_p,
             tools=tools,
             tool_choice=tool_choice,
-            response_format=None,
+            response_format=response_format,
             service_tier=service_tier,
             provider=provider,
             stop=stop,
             extra=extra,
         )
         body["stream"] = True
-        async with self._http.astream_request("POST", "chat/completions", json=body) as response:
+        return AsyncChatStream(self._astream_chunks(body, opts))
+
+    async def _astream_chunks(
+        self, body: dict[str, Any], opts: RequestOptions
+    ) -> AsyncIterator[StreamChunk]:
+        async with self._http.astream_request(
+            "POST", "chat/completions", json=body, **opts
+        ) as response:
             async for chunk in _aiter_sse(
                 response,
                 http=self._http,
-                generation_id=response.headers.get("X-Generation-Id"),
+                generation_id=response.generation_id,
             ):
                 yield chunk
+
+
+ParsedT = TypeVar("ParsedT", bound=BaseModel)
+
+
+class ParsedResult(Generic[ParsedT]):
+    """A chat result plus the object it was validated into."""
+
+    def __init__(self, result: ChatResult, parsed: ParsedT) -> None:
+        self.result = result
+        self.parsed = parsed
+
+    @property
+    def content(self) -> str | None:
+        return self.result.content
+
+    @property
+    def usage(self) -> Usage | None:
+        return self.result.usage
+
+    @property
+    def cost_rub(self) -> Decimal | None:
+        return self.result.cost_rub
+
+    @property
+    def generation_id(self) -> str | None:
+        return self.result.generation_id
+
+
+def _json_schema_format(response_model: type[BaseModel]) -> dict[str, Any]:
+    schema = response_model.model_json_schema()
+    schema.setdefault("additionalProperties", False)
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": response_model.__name__,
+            "schema": schema,
+            "strict": True,
+        },
+    }
+
+
+def _validate_parsed(result: ChatResult, response_model: type[ParsedT]) -> ParsedT:
+    if not result.content:
+        raise ResponseParsingError("model returned no content to parse", body=result.raw)
+    try:
+        payload = json.loads(result.content)
+    except ValueError as exc:
+        raise ResponseParsingError(
+            "model did not return JSON despite the requested schema", body=result.content
+        ) from exc
+    try:
+        return response_model.model_validate(payload)
+    except ValidationError as exc:
+        raise ResponseParsingError(
+            f"model output does not match {response_model.__name__}: {exc}", body=payload
+        ) from exc
+
+
+def _execute(call: ToolCall, registry: dict[str, ToolFunction]) -> ToolRun:
+    name = call.name or ""
+    function = registry.get(name)
+    if function is None:
+        return ToolRun(name, {}, None, error=f"no tool named {name!r} was provided")
+    try:
+        arguments = parse_arguments(call.arguments)
+    except RouterAIError as exc:
+        return ToolRun(name, {}, None, error=str(exc))
+    try:
+        return ToolRun(name, arguments, function(**arguments))
+    except Exception as exc:
+        # A failing tool is information for the model, not a crash for the caller.
+        return ToolRun(name, arguments, None, error=f"{type(exc).__name__}: {exc}")
+
+
+async def _aexecute(call: ToolCall, registry: dict[str, ToolFunction]) -> ToolRun:
+    run = _execute(call, registry)
+    if inspect.isawaitable(run.result):
+        try:
+            run.result = await run.result
+        except Exception as exc:
+            run.result, run.error = None, f"{type(exc).__name__}: {exc}"
+    return run
+
+
+class ChatStream:
+    """An open chat stream.
+
+    Iterating works exactly as before. The context-manager form closes the
+    connection deterministically::
+
+        with client.chat.stream(model, prompt) as stream:
+            for chunk in stream:
+                ...
+    """
+
+    def __init__(self, chunks: Iterator[StreamChunk]) -> None:
+        self._chunks = chunks
+
+    def __iter__(self) -> Iterator[StreamChunk]:
+        return self._chunks
+
+    def __next__(self) -> StreamChunk:
+        return next(self._chunks)
+
+    def __enter__(self) -> ChatStream:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        close = getattr(self._chunks, "close", None)
+        if close is not None:
+            close()
+
+
+class AsyncChatStream:
+    """The async counterpart of :class:`ChatStream`.
+
+    Here the context manager matters more than convenience: reference counting
+    closes an abandoned sync generator, but an abandoned async one keeps the
+    connection until the loop shuts down its async generators.
+    """
+
+    def __init__(self, chunks: AsyncIterator[StreamChunk]) -> None:
+        self._chunks = chunks
+
+    def __aiter__(self) -> AsyncIterator[StreamChunk]:
+        return self._chunks
+
+    async def __anext__(self) -> StreamChunk:
+        return await self._chunks.__anext__()
+
+    async def __aenter__(self) -> AsyncChatStream:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        await self.aclose()
+
+    async def aclose(self) -> None:
+        aclose = getattr(self._chunks, "aclose", None)
+        if aclose is not None:
+            await aclose()
 
 
 class StreamChunk:
@@ -364,7 +673,7 @@ class StreamAccumulator:
         self.generation_id: str | None = None
         self._content: list[str] = []
         self._reasoning: list[str] = []
-        self._tool_calls: list[dict[str, Any]] = []
+        self._tool_calls: dict[int, dict[str, Any]] = {}
         self._audio: list[AudioDelta] = []
         self._usage: Usage | None = None
         self._finish_reason: str | None = None
@@ -378,14 +687,45 @@ class StreamAccumulator:
             self._content.append(chunk.content)
         if chunk.reasoning:
             self._reasoning.append(chunk.reasoning)
-        if chunk.tool_calls:
-            self._tool_calls.extend(chunk.tool_calls)
+        for delta in chunk.tool_calls:
+            self._merge_tool_call(delta)
         if chunk.audio is not None:
             self._audio.append(chunk.audio)
         if chunk.usage is not None:
             self._usage = chunk.usage
         if chunk.finish_reason:
             self._finish_reason = chunk.finish_reason
+
+    def _merge_tool_call(self, delta: dict[str, Any]) -> None:
+        """Fold one tool-call delta into the call it belongs to.
+
+        A tool call arrives split across chunks: the first carries ``id`` and
+        the function name, the rest append a character or two of arguments,
+        all under the same ``index``. Collecting them as separate calls leaves
+        the caller with fragments that no JSON parser will accept.
+        """
+        index = delta.get("index")
+        if not isinstance(index, int):
+            index = len(self._tool_calls)
+        call = self._tool_calls.setdefault(index, {"index": index, "function": {}})
+
+        for key, value in delta.items():
+            if key in ("index", "function"):
+                continue
+            if value is not None:
+                call[key] = value
+
+        function = delta.get("function")
+        if not isinstance(function, dict):
+            return
+        merged = call["function"]
+        for key, value in function.items():
+            if value is None:
+                continue
+            if key == "arguments":
+                merged["arguments"] = f"{merged.get('arguments', '')}{value}"
+            else:
+                merged[key] = value
 
     @property
     def content(self) -> str:
@@ -397,7 +737,8 @@ class StreamAccumulator:
 
     @property
     def tool_calls(self) -> list[dict[str, Any]]:
-        return list(self._tool_calls)
+        """Complete tool calls, ordered by index and ready to execute."""
+        return [self._tool_calls[index] for index in sorted(self._tool_calls)]
 
     @property
     def audio(self) -> list[AudioDelta]:
@@ -428,52 +769,6 @@ class StreamAccumulator:
         }
 
 
-def _parse_sse_event(data: str, chunks_received: int) -> dict[str, Any] | None:
-    if data == "[DONE]":
-        return None
-    try:
-        payload = json.loads(data)
-    except json.JSONDecodeError as exc:
-        raise RouterAIError(f"unparsable SSE line: {data!r}") from exc
-    error = payload.get("error") if isinstance(payload, dict) else None
-    if error:
-        raise APIStatusError(
-            str(error.get("message", error) if isinstance(error, dict) else error),
-            _safe_status(payload),
-            dict(payload),
-        )
-    return dict(payload)
-
-
-def _safe_status(payload: dict[str, Any]) -> int:
-    """Normalize an SSE error status.
-
-    Precedence: nested ``error.status_code``/``error.status``, then root
-    ``status_code``/``status``; malformed or out-of-range values fall back
-    to 502.
-    """
-    error = payload.get("error")
-    if isinstance(error, dict):
-        status = _normalize_status_value(error)
-        if status is not None:
-            return status
-    return _normalize_status_value(payload) or 502
-
-
-def _normalize_status_value(mapping: dict[str, Any]) -> int | None:
-    for key in ("status_code", "status"):
-        value = mapping.get(key)
-        if isinstance(value, bool):
-            continue
-        if isinstance(value, int) and 100 <= value <= 599:
-            return value
-        if isinstance(value, str) and value.isdigit():
-            number = int(value)
-            if 100 <= number <= 599:
-                return number
-    return None
-
-
 def _iter_sse(
     response: Any, *, http: HTTPClient, generation_id: str | None = None
 ) -> Iterator[StreamChunk]:
@@ -483,10 +778,13 @@ def _iter_sse(
             if not line or not line.startswith("data:"):
                 continue
             data = line[5:].strip()
-            payload = _parse_sse_event(data, chunks_received)
-            if payload is None:
+            if data == DONE_MARKER:
                 break
+            payload = parse_stream_event(data)
+            if payload is None:
+                continue
             chunks_received += 1
+            response.note_chunk(payload)
             yield StreamChunk(payload, generation_id=generation_id)
     except (httpx.TimeoutException, httpx.TransportError) as exc:
         raise StreamInterruptedError(
@@ -504,10 +802,13 @@ async def _aiter_sse(
             if not line or not line.startswith("data:"):
                 continue
             data = line[5:].strip()
-            payload = _parse_sse_event(data, chunks_received)
-            if payload is None:
+            if data == DONE_MARKER:
                 break
+            payload = parse_stream_event(data)
+            if payload is None:
+                continue
             chunks_received += 1
+            response.note_chunk(payload)
             yield StreamChunk(payload, generation_id=generation_id)
     except (httpx.TimeoutException, httpx.TransportError) as exc:
         raise StreamInterruptedError(

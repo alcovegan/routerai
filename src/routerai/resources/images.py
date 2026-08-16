@@ -7,8 +7,12 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import httpx
+
+from .._errors import DONE_MARKER, parse_stream_event
 from .._extras import merge_extra
-from ..errors import RequestError, RouterAIError
+from .._options import RequestOptions, Unpack
+from ..errors import RequestError, RouterAIError, StreamInterruptedError
 from ..schemas import Usage
 
 if TYPE_CHECKING:
@@ -151,6 +155,7 @@ class Images:
         seed: int | None = None,
         input_references: list[Any] | None = None,
         extra: dict[str, Any] | None = None,
+        **opts: Unpack[RequestOptions],
     ) -> ImageResult:
         body = self._body(
             model,
@@ -167,7 +172,7 @@ class Images:
             input_references=input_references,
             extra=extra,
         )
-        response = self._http.post("images", json=body)
+        response = self._http.post("images", json=body, **opts)
         return self._parse(response)
 
     async def agenerate(
@@ -186,6 +191,7 @@ class Images:
         seed: int | None = None,
         input_references: list[Any] | None = None,
         extra: dict[str, Any] | None = None,
+        **opts: Unpack[RequestOptions],
     ) -> ImageResult:
         body = self._body(
             model,
@@ -202,7 +208,7 @@ class Images:
             input_references=input_references,
             extra=extra,
         )
-        response = await self._http.apost("images", json=body)
+        response = await self._http.apost("images", json=body, **opts)
         return self._parse(response)
 
     def stream(
@@ -221,6 +227,7 @@ class Images:
         seed: int | None = None,
         input_references: list[Any] | None = None,
         extra: dict[str, Any] | None = None,
+        **opts: Unpack[RequestOptions],
     ) -> Iterator[ImageStreamChunk]:
         """Streaming generation: partial previews then a completed event."""
         body = self._body(
@@ -239,7 +246,7 @@ class Images:
             extra=extra,
         )
         body["stream"] = True
-        with self._http.stream_request("POST", "images", json=body) as response:
+        with self._http.stream_request("POST", "images", json=body, **opts) as response:
             yield from _iter_image_sse(
                 response, http=self._http, generation_id=response.headers.get("X-Generation-Id")
             )
@@ -260,6 +267,7 @@ class Images:
         seed: int | None = None,
         input_references: list[Any] | None = None,
         extra: dict[str, Any] | None = None,
+        **opts: Unpack[RequestOptions],
     ) -> AsyncIterator[ImageStreamChunk]:
         body = self._body(
             model,
@@ -277,7 +285,7 @@ class Images:
             extra=extra,
         )
         body["stream"] = True
-        async with self._http.astream_request("POST", "images", json=body) as response:
+        async with self._http.astream_request("POST", "images", json=body, **opts) as response:
             async for chunk in _aiter_image_sse(
                 response, http=self._http, generation_id=response.headers.get("X-Generation-Id")
             ):
@@ -410,34 +418,46 @@ class ImageStreamChunk:
 def _iter_image_sse(
     response: Any, *, http: HTTPClient, generation_id: str | None = None
 ) -> Iterator[ImageStreamChunk]:
-    import json
-
-    for line in response.iter_lines():
-        if not line or not line.startswith("data:"):
-            continue
-        data = line[5:].strip()
-        if data == "[DONE]":
-            break
-        try:
-            payload = json.loads(data)
-        except ValueError as exc:
-            raise RouterAIError(f"unparsable image SSE line: {data!r}") from exc
-        yield ImageStreamChunk(dict(payload), generation_id=generation_id)
+    chunks_received = 0
+    try:
+        for line in response.iter_lines():
+            if not line or not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == DONE_MARKER:
+                break
+            payload = parse_stream_event(data)
+            if payload is None:
+                continue
+            chunks_received += 1
+            response.note_chunk(payload)
+            yield ImageStreamChunk(payload, generation_id=generation_id)
+    except (httpx.TimeoutException, httpx.TransportError) as exc:
+        raise StreamInterruptedError(
+            f"image stream interrupted after {chunks_received} chunks: {exc}",
+            chunks_received=chunks_received,
+        ) from exc
 
 
 async def _aiter_image_sse(
     response: Any, *, http: HTTPClient, generation_id: str | None = None
 ) -> AsyncIterator[ImageStreamChunk]:
-    import json
-
-    async for line in response.aiter_lines():
-        if not line or not line.startswith("data:"):
-            continue
-        data = line[5:].strip()
-        if data == "[DONE]":
-            break
-        try:
-            payload = json.loads(data)
-        except ValueError as exc:
-            raise RouterAIError(f"unparsable image SSE line: {data!r}") from exc
-        yield ImageStreamChunk(dict(payload), generation_id=generation_id)
+    chunks_received = 0
+    try:
+        async for line in response.aiter_lines():
+            if not line or not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == DONE_MARKER:
+                break
+            payload = parse_stream_event(data)
+            if payload is None:
+                continue
+            chunks_received += 1
+            response.note_chunk(payload)
+            yield ImageStreamChunk(payload, generation_id=generation_id)
+    except (httpx.TimeoutException, httpx.TransportError) as exc:
+        raise StreamInterruptedError(
+            f"image stream interrupted after {chunks_received} chunks: {exc}",
+            chunks_received=chunks_received,
+        ) from exc

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 DEFAULT_LOGGER_NAME = "routerai"
@@ -27,9 +27,18 @@ def mask_key(value: Any) -> str:
 
 
 def format_cost(value: Decimal | float | None) -> str:
+    """Format a cost for logging, never raising.
+
+    The response is already paid for by the time it is logged, so a value the
+    provider reported in an unexpected shape must not turn into an exception
+    that loses the result.
+    """
     if value is None:
         return "?"
-    return f"{Decimal(str(value)).normalize():f}₽"
+    try:
+        return f"{Decimal(str(value)).normalize():f}₽"
+    except (InvalidOperation, ValueError):
+        return f"{value}"
 
 
 def log_request(

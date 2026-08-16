@@ -1,0 +1,23 @@
+{
+  "name": "transcription_ok",
+  "note": "Транскрипция: usage с input_tokens/output_tokens, поля cost нет; ответ одинаков для response_format json/text/srt",
+  "finding": "L3, 06",
+  "recorded_from": "https://routerai.ru/api/v1",
+  "request": {
+    "method": "POST",
+    "path": "/audio/transcriptions",
+    "body": {
+      "model": "openai/gpt-4o-mini-transcribe",
+      "input_audio": {
+        "data": "UklGRiRLAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQBLAAAAAA8I",
+        "format": "wav"
+      },
+      "response_format": "json"
+    }
+  },
+  "response": {
+    "status": 200,
+    "content_type": "application/json",
+    "body": "{\"text\":\"\",\"usage\":{\"input_tokens\":6,\"output_tokens\":2}}"
+  }
+}

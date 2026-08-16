@@ -1,33 +1,43 @@
 from __future__ import annotations
 
-import json
 import logging
+import platform
 import random
+import threading
 import time
-from collections.abc import AsyncIterator, Iterator
-from contextlib import asynccontextmanager, contextmanager
+from collections import OrderedDict
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
+from contextlib import asynccontextmanager, contextmanager, suppress
+from contextvars import ContextVar, Token
+from dataclasses import dataclass
 from json import loads as _json_loads
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
+from ._errors import build_error
+from ._options import RequestOptions, Unpack
+from ._version import __version__
 from .errors import (
-    APIStatusError,
-    AuthenticationError,
+    APIConnectionError,
+    APITimeoutError,
     ConfigurationError,
     DeadlineExceededError,
-    InsufficientFundsError,
-    NoProviderError,
-    NotFoundError,
-    PermissionDeniedError,
-    RateLimitError,
     RequestError,
-    RouterAIError,
+    ResponseParsingError,
 )
 from .logging import log_request, mask_key
+from .usage import UsageHook, UsageTracker, record_from
 
 DEFAULT_BASE_URL = "https://routerai.ru/api/v1"
 DEFAULT_TIMEOUT = 60.0
+
+# Identify the SDK to the server: without this RouterAI sees "python-httpx"
+# and cannot tell its own client from a hand-rolled request.
+USER_AGENT = (
+    f"routerai-python/{__version__} (python/{platform.python_version()}; httpx/{httpx.__version__})"
+)
 
 # Statuses retried for idempotent (safe) methods.
 RETRYABLE_SAFE_STATUSES = {408, 425, 429, 500, 502, 503, 504}
@@ -36,49 +46,38 @@ RETRYABLE_SAFE_STATUSES = {408, 425, 429, 500, 502, 503, 504}
 RETRYABLE_UNSAFE_STATUSES = {429}
 SAFE_METHODS = {"GET", "HEAD"}
 
-_STATUS_TO_ERROR: dict[int, type[RouterAIError]] = {
-    401: AuthenticationError,
-    402: InsufficientFundsError,
-    403: PermissionDeniedError,
-    404: NotFoundError,
-    429: RateLimitError,
-}
+
+def _raise_for_status(
+    status: int,
+    body: Any,
+    *,
+    headers: Any = None,
+    error_in_body: bool = True,
+) -> None:
+    """Raise the typed error this response describes, if it describes one."""
+    error = build_error(http_status=status, body=body, headers=headers, error_in_body=error_in_body)
+    if error is not None:
+        raise error
 
 
-def _parse_error_payload(payload: Any) -> str:
-    error = payload.get("error") if isinstance(payload, dict) else None
-    if isinstance(error, dict) and error.get("message"):
-        return str(error["message"])
-    if isinstance(error, str) and error:
-        return error
-    return ""
+def _transport_error(message: str, exc: Exception | None) -> RequestError:
+    """Distinguish a timeout from a connection failure — they need different fixes."""
+    if isinstance(exc, httpx.TimeoutException):
+        return APITimeoutError(message)
+    if isinstance(exc, httpx.ConnectError):
+        return APIConnectionError(message)
+    return RequestError(message)
 
 
-def _error_message_from_body(status: int, body: Any) -> str:
-    """Extract the error message from an already decoded body, or ''.
+@dataclass(frozen=True)
+class _Call:
+    """Settings resolved for one request."""
 
-    For HTTP 200 responses only JSON error payloads count — plain-text or
-    binary 200 bodies (e.g. TTS audio) are not errors.
-    """
-    message = _parse_error_payload(body)
-    if not message and isinstance(body, str) and status >= 400:
-        message = body.strip()
-    return message
-
-
-def _raise_for_status(status: int, message: str, body: Any) -> None:
-    if status < 400:
-        # RouterAI sometimes wraps provider errors in an HTTP 200 body
-        if message:
-            raise APIStatusError(message, status, body)
-        return
-    text = message or f"HTTP {status}"
-    if status == 503 and "provider" in text.lower() and "available" in text.lower():
-        raise NoProviderError(text)
-    error_cls = _STATUS_TO_ERROR.get(status, APIStatusError)
-    if error_cls is APIStatusError:
-        raise APIStatusError(text, status, body)
-    raise error_cls(text)
+    timeout: float
+    max_retries: int
+    deadline: float | None
+    headers: Mapping[str, str] | None
+    error_in_body: bool
 
 
 class ResponseEnvelope:
@@ -100,19 +99,22 @@ class ResponseEnvelope:
         self.request_id = response.headers.get("X-Request-Id") or response.headers.get("Request-Id")
         content_type = response.headers.get("content-type", "").lower()
         if "json" in content_type and response.status_code != 204:
+            # Decode, but do not force the result into a dict: a JSON array of
+            # two-key objects would be read as key/value pairs and turn into a
+            # dictionary that never existed in the response.
             try:
-                self._body = dict(response.json())
+                self._body = response.json()
                 self._is_json = True
             except ValueError:
                 pass
 
     @property
     def body(self) -> Any:
-        """The decoded body (dict for JSON responses, bytes otherwise)."""
+        """The decoded body (mapping for JSON objects, bytes otherwise)."""
         if self._body is None:
             if self._is_json:
                 try:
-                    self._body = dict(self._response.json())
+                    self._body = self._response.json()
                 except ValueError:
                     self._is_json = False
                     self._body = self._response.content
@@ -121,10 +123,20 @@ class ResponseEnvelope:
         return self._body
 
     def json(self) -> dict[str, Any]:
+        """The body as a JSON object.
+
+        An empty body — which is what a 204 on DELETE looks like — reads as an
+        empty object rather than an error, so deleting a key does not fail
+        after the server already deleted it.
+        """
+        if self.status_code == 204:
+            return {}
         body = self.body
-        if not isinstance(body, dict):
-            raise ValueError("response is not a JSON object")
-        return dict(body)
+        if isinstance(body, dict):
+            return dict(body)
+        if body in (None, b"", ""):
+            return {}
+        raise ResponseParsingError(f"expected a JSON object, got {type(body).__name__}", body=body)
 
     @property
     def content(self) -> bytes:
@@ -148,29 +160,46 @@ class ResponseEnvelope:
         return getattr(self._response, name)
 
 
-def _error_message_for_stream(response: httpx.Response) -> str:
-    """Error message for streamed responses (reads the body once)."""
-    if (
-        response.status_code < 400
-        and "json" not in response.headers.get("content-type", "").lower()
-    ):
-        return ""
+class StreamEnvelope:
+    """An open stream that remembers what the last chunk said it cost.
+
+    A context variable cannot be used for this: generators do not carry their
+    own context, so interleaving two streams would file one stream's usage
+    under the other. The chunk reader hands its payload here instead.
+    """
+
+    def __init__(self, response: httpx.Response) -> None:
+        self._response = response
+        self.usage_payload: dict[str, Any] | None = None
+        self.model: str | None = None
+
+    @property
+    def generation_id(self) -> str | None:
+        value = self._response.headers.get("X-Generation-Id")
+        return str(value) if value else None
+
+    def note_chunk(self, payload: Mapping[str, Any]) -> None:
+        usage = payload.get("usage")
+        if isinstance(usage, Mapping):
+            self.usage_payload = dict(usage)
+        model = payload.get("model")
+        if isinstance(model, str):
+            self.model = model
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._response, name)
+
+
+def _stream_body(response: httpx.Response) -> Any:
+    """Decoded body of a streamed response, for error mapping."""
     try:
-        body = response.text
+        text = response.text
     except httpx.ResponseNotRead:
-        body = response.read().decode("utf-8", errors="replace")
-    message = _parse_error_payload(json.loads(body)) if _looks_json(body) else ""
-    if not message and response.status_code >= 400:
-        message = body.strip()
-    return message
-
-
-def _looks_json(body: str) -> bool:
+        text = response.read().decode("utf-8", errors="replace")
     try:
-        json.loads(body)
+        return _json_loads(text)
     except ValueError:
-        return False
-    return True
+        return text
 
 
 def _retry_after_seconds(response: httpx.Response, *, max_retry_after: float) -> float | None:
@@ -226,6 +255,7 @@ class HTTPClient:
         http_client: httpx.Client | httpx.AsyncClient | None = None,
         async_http_client: httpx.AsyncClient | None = None,
         default_headers: dict[str, str] | None = None,
+        app_info: str | None = None,
     ) -> None:
         if async_http_client is not None and isinstance(http_client, httpx.AsyncClient):
             raise ConfigurationError("pass async transport via async_http_client, not http_client")
@@ -251,10 +281,16 @@ class HTTPClient:
 
             logger = get_logger(logger)
         self._logger = logger
-        self._headers = {
-            "Content-Type": "application/json",
-            **(default_headers or {}),
-        }
+        user_agent = USER_AGENT if app_info is None else f"{USER_AGENT} {app_info}"
+        self._headers = dict(
+            httpx.Headers(
+                {
+                    "Content-Type": "application/json",
+                    "User-Agent": user_agent,
+                    **(default_headers or {}),
+                }
+            )
+        )
         if api_key:
             self._headers["Authorization"] = f"Bearer {api_key}"
 
@@ -262,23 +298,44 @@ class HTTPClient:
         self._async_client = async_http_client
         self._owns_sync = self._sync_client is None
         self._owns_async = self._async_client is None
+        self._sync_closed = False
+        self._async_closed = False
+        self._transport_lock = threading.Lock()
+        self.usage = UsageTracker()
+        self._trackers: ContextVar[tuple[UsageTracker, ...]] = ContextVar(
+            f"routerai_trackers_{id(self)}", default=()
+        )
+        self._usage_hooks: list[UsageHook] = []
+        # Polling a video returns the same usage on every refresh; without this
+        # the cost of one generation would be counted once per poll.
+        self._counted_generations: OrderedDict[str, None] = OrderedDict()
 
     @property
     def logger(self) -> logging.Logger:
         return self._logger
 
     @staticmethod
-    def _validate_config(
-        timeout: float, max_retries: int, retry_backoff: float, max_retry_after: float
-    ) -> None:
+    def _validate_timeout(timeout: float) -> None:
         import math
 
         if not math.isfinite(timeout) or timeout <= 0:
             raise ConfigurationError(f"timeout must be a positive finite number, got {timeout!r}")
+
+    @staticmethod
+    def _validate_max_retries(max_retries: int) -> None:
         if not isinstance(max_retries, int) or isinstance(max_retries, bool) or max_retries < 0:
             raise ConfigurationError(
                 f"max_retries must be a non-negative integer, got {max_retries!r}"
             )
+
+    @classmethod
+    def _validate_config(
+        cls, timeout: float, max_retries: int, retry_backoff: float, max_retry_after: float
+    ) -> None:
+        import math
+
+        cls._validate_timeout(timeout)
+        cls._validate_max_retries(max_retries)
         if not math.isfinite(retry_backoff) or retry_backoff < 0:
             raise ConfigurationError(
                 f"retry_backoff must be a non-negative finite number, got {retry_backoff!r}"
@@ -289,29 +346,84 @@ class HTTPClient:
             )
 
     def _ensure_sync_client(self) -> httpx.Client:
+        if self._sync_closed:
+            raise RuntimeError("client is closed")
         if self._sync_client is None:
-            self._sync_client = httpx.Client()
-            self._owns_sync = True
+            # Under a lock: two threads racing here would each build a pool,
+            # and only one of them would ever be closed.
+            with self._transport_lock:
+                if self._sync_client is None:
+                    self._sync_client = httpx.Client()
+                    self._owns_sync = True
         return self._sync_client
 
     def _ensure_async_client(self) -> httpx.AsyncClient:
+        if self._async_closed:
+            raise RuntimeError("client is closed")
         if self._async_client is None:
             self._async_client = httpx.AsyncClient()
             self._owns_async = True
         return self._async_client
 
+    def _resolve(self, opts: RequestOptions) -> _Call:
+        """Merge per-call options with the client defaults.
+
+        Reading self._max_retries and self._timeout directly in a dozen places
+        is what made per-call overrides impossible; everything goes through here
+        now.
+        """
+        timeout = opts.get("timeout")
+        if timeout is None:
+            timeout = self._timeout
+        else:
+            self._validate_timeout(timeout)
+        retries = opts.get("max_retries")
+        if retries is None:
+            retries = self._max_retries
+        else:
+            self._validate_max_retries(retries)
+        return _Call(
+            timeout=timeout,
+            max_retries=retries,
+            deadline=opts.get("deadline"),
+            headers=opts.get("headers"),
+            error_in_body=opts.get("error_in_body", True),
+        )
+
     def _build_url(self, path: str) -> str:
-        return f"{self._base_url}/{path.lstrip('/')}"
+        """Join the path to the base url, escaping each segment.
+
+        Identifiers come from callers and sometimes from other systems. Without
+        escaping, a task id of "../keys" walks out of /api/v1 and sends the
+        Authorization header to a different endpoint entirely. Dot segments are
+        escaped explicitly — quote() leaves them alone, and httpx would resolve
+        them away.
+        """
+        segments = []
+        for segment in path.strip("/").split("/"):
+            if not segment:
+                continue
+            if segment in (".", ".."):
+                segment = segment.replace(".", "%2E")
+            else:
+                segment = quote(segment, safe="")
+            segments.append(segment)
+        return f"{self._base_url}/{'/'.join(segments)}"
 
     def _merge_headers(
-        self, headers: dict[str, str] | None, *, content: bytes | None = None
+        self, headers: Mapping[str, str] | None, *, content: bytes | None = None
     ) -> dict[str, str]:
-        merged = dict(self._headers)
+        """Client headers with per-call ones on top.
+
+        httpx.Headers matches case-insensitively, so a caller passing
+        "user-agent" replaces the default instead of sending it twice.
+        """
+        merged = httpx.Headers(self._headers)
         if headers:
             merged.update(headers)
         if content is not None:
-            merged.pop("Content-Type", None)
-        return merged
+            merged.pop("content-type", None)
+        return dict(merged)
 
     # --- retry policy ---
 
@@ -375,39 +487,86 @@ class HTTPClient:
                 raise DeadlineExceededError("deadline exceeded during retry backoff")
         await asyncio.sleep(delay)
 
-    def _log_result(
-        self, response: httpx.Response | ResponseEnvelope, method: str, url: str, elapsed: float
+    def _observe(
+        self,
+        *,
+        method: str,
+        url: str,
+        status: int | None,
+        elapsed: float,
+        body: Any = None,
+        label: str | None = None,
+        streamed: bool = False,
+        generation_id: str | None = None,
+        request_id: str | None = None,
     ) -> None:
-        if not self._logger.isEnabledFor(logging.INFO):
-            return
-        tokens = cost = None
-        if isinstance(response, ResponseEnvelope):
-            body = response.body
-            if isinstance(body, dict):
-                usage = body.get("usage")
-                if isinstance(usage, dict):
-                    tokens = usage.get("total_tokens")
-                    cost = usage.get("cost")
-        else:
-            content_type = response.headers.get("content-type", "").lower()
-            if "json" in content_type:
-                try:
-                    payload = response.json()
-                    usage = payload.get("usage")
-                    if isinstance(usage, dict):
-                        tokens = usage.get("total_tokens")
-                        cost = usage.get("cost")
-                except ValueError:
-                    pass
+        """Account for one request, then log it.
+
+        Deliberately not gated on the log level: accounting that only works
+        when INFO logging happens to be on is accounting nobody can trust.
+        """
+        duplicate = False
+        if generation_id:
+            if generation_id in self._counted_generations:
+                duplicate = True
+            else:
+                self._counted_generations[generation_id] = None
+                if len(self._counted_generations) > 4096:
+                    self._counted_generations.popitem(last=False)
+        record = record_from(
+            method=method,
+            path=url,
+            status=status,
+            elapsed=elapsed,
+            body=body,
+            label=label,
+            streamed=streamed,
+            generation_id=generation_id,
+            request_id=request_id,
+            duplicate=duplicate,
+        )
+        self.usage.add(record)
+        for tracker in self._trackers.get():
+            tracker.add(record)
+        for hook in tuple(self._usage_hooks):
+            try:
+                hook(record)
+            except Exception:  # a callback must never break the call
+                self._logger.warning("usage callback failed", exc_info=True)
         log_request(
             self._logger,
             method,
             url,
             elapsed=elapsed,
-            status=response.status_code,
-            tokens=tokens,
-            cost=cost,
+            status=status,
+            tokens=record.total_tokens or None,
+            cost=record.cost_rub,
         )
+
+    def track(self, label: str | None = None) -> UsageTracker:
+        """Start a tracker for the current context; see RouterAI.track()."""
+        return UsageTracker(label=label)
+
+    def push_tracker(self, tracker: UsageTracker) -> Token[tuple[UsageTracker, ...]]:
+        return self._trackers.set((*self._trackers.get(), tracker))
+
+    def pop_tracker(self, token: Token[tuple[UsageTracker, ...]]) -> None:
+        self._trackers.reset(token)
+
+    def current_label(self) -> str | None:
+        for tracker in reversed(self._trackers.get()):
+            if tracker.label:
+                return tracker.label
+        return None
+
+    def on_usage(self, hook: UsageHook) -> Callable[[], None]:
+        self._usage_hooks.append(hook)
+
+        def unsubscribe() -> None:
+            with suppress(ValueError):
+                self._usage_hooks.remove(hook)
+
+        return unsubscribe
 
     # --- sync ---
 
@@ -419,17 +578,17 @@ class HTTPClient:
         params: dict[str, Any] | None = None,
         json: Any = None,
         content: bytes | None = None,
-        headers: dict[str, str] | None = None,
-        timeout: float | None = None,
-        deadline: float | None = None,
+        **opts: Unpack[RequestOptions],
     ) -> ResponseEnvelope:
         url = self._build_url(path)
-        request_headers = self._merge_headers(headers, content=content)
+        call = self._resolve(opts)
+        request_headers = self._merge_headers(call.headers, content=content)
         client = self._ensure_sync_client()
+        deadline = call.deadline
 
         last_exc: Exception | None = None
-        for attempt in range(self._max_retries + 1):
-            attempt_timeout = self._timeout if timeout is None else timeout
+        for attempt in range(call.max_retries + 1):
+            attempt_timeout = call.timeout
             if deadline is not None:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -448,7 +607,13 @@ class HTTPClient:
                 )
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 last_exc = exc
-                if attempt < self._max_retries and self._should_retry_transport(method, exc):
+                if deadline is not None and time.monotonic() >= deadline:
+                    # Same situation as the async path, which reports the
+                    # deadline rather than the socket timeout that ended it.
+                    raise DeadlineExceededError(
+                        f"deadline exceeded while waiting for attempt {attempt + 1}"
+                    ) from exc
+                if attempt < call.max_retries and self._should_retry_transport(method, exc):
                     self._logger.warning(
                         "retry %s %s after %s (attempt %d)", method, url, mask_key(exc), attempt + 1
                     )
@@ -463,7 +628,7 @@ class HTTPClient:
             elapsed = time.monotonic() - started
             if (
                 self._should_retry_status(method, response.status_code)
-                and attempt < self._max_retries
+                and attempt < call.max_retries
             ):
                 response.read()
                 response.close()
@@ -477,15 +642,27 @@ class HTTPClient:
                 self._wait(attempt, response, deadline=deadline)
                 continue
             envelope = ResponseEnvelope(response)
-            self._log_result(envelope, method, url, elapsed)
+            self._observe(
+                method=method,
+                url=url,
+                status=envelope.status_code,
+                elapsed=elapsed,
+                body=envelope.body,
+                label=self.current_label(),
+                generation_id=envelope.generation_id,
+                request_id=envelope.request_id,
+            )
             _raise_for_status(
                 envelope.status_code,
-                _error_message_from_body(envelope.status_code, envelope.body),
                 envelope.body,
+                headers=envelope.headers,
+                error_in_body=call.error_in_body,
             )
             return envelope
 
-        raise RequestError(f"{method} {url} failed: {mask_key(last_exc)}")
+        raise _transport_error(
+            f"{method} {url} failed: {mask_key(last_exc)}", last_exc
+        ) from last_exc
 
     @contextmanager
     def stream_request(
@@ -496,9 +673,8 @@ class HTTPClient:
         params: dict[str, Any] | None = None,
         json: Any = None,
         content: bytes | None = None,
-        headers: dict[str, str] | None = None,
-        timeout: float | None = None,
-    ) -> Iterator[httpx.Response]:
+        **opts: Unpack[RequestOptions],
+    ) -> Iterator[StreamEnvelope]:
         """Open a streaming response.
 
         Retries happen only before the response is handed to the caller.
@@ -506,12 +682,13 @@ class HTTPClient:
         without retry (the request may already be billed).
         """
         url = self._build_url(path)
-        request_headers = self._merge_headers(headers, content=content)
+        call = self._resolve(opts)
+        request_headers = self._merge_headers(call.headers, content=content)
         client = self._ensure_sync_client()
 
         yielded = False
         last_exc: Exception | None = None
-        for attempt in range(self._max_retries + 1):
+        for attempt in range(call.max_retries + 1):
             started = time.monotonic()
             try:
                 with client.stream(
@@ -521,11 +698,11 @@ class HTTPClient:
                     json=json,
                     content=content,
                     headers=request_headers,
-                    timeout=self._timeout if timeout is None else timeout,
+                    timeout=call.timeout,
                 ) as response:
                     if (
                         self._should_retry_status(method, response.status_code)
-                        and attempt < self._max_retries
+                        and attempt < call.max_retries
                     ):
                         response.read()
                         self._logger.warning(
@@ -537,36 +714,46 @@ class HTTPClient:
                         )
                         self._wait(attempt, response)
                         continue
-                    log_request(
-                        self._logger,
-                        method,
-                        url,
-                        elapsed=time.monotonic() - started,
-                        status=response.status_code,
-                    )
                     if response.status_code >= 400:
-                        message = _error_message_for_stream(response)
-                        body: Any = None
-                        try:
-                            body = _json_loads(response.text)
-                        except ValueError:
-                            body = response.text
-                        _raise_for_status(response.status_code, message, body)
+                        _raise_for_status(
+                            response.status_code,
+                            _stream_body(response),
+                            headers=response.headers,
+                        )
                     yielded = True
-                    yield response
+                    envelope = StreamEnvelope(response)
+                    try:
+                        yield envelope
+                    finally:
+                        # finally, not after the yield: a caller that breaks out
+                        # early still paid for what the stream produced.
+                        self._observe(
+                            method=method,
+                            url=url,
+                            status=response.status_code,
+                            elapsed=time.monotonic() - started,
+                            body={"usage": envelope.usage_payload, "model": envelope.model}
+                            if envelope.usage_payload
+                            else None,
+                            label=self.current_label(),
+                            streamed=True,
+                            generation_id=envelope.generation_id,
+                        )
                     return
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 if yielded:
                     raise
                 last_exc = exc
-                if attempt < self._max_retries and self._should_retry_transport(method, exc):
+                if attempt < call.max_retries and self._should_retry_transport(method, exc):
                     self._logger.warning(
                         "retry %s %s after %s (attempt %d)", method, url, mask_key(exc), attempt + 1
                     )
                     self._wait(attempt)
                     continue
                 break
-        raise RequestError(f"{method} {url} failed: {mask_key(last_exc)}")
+        raise _transport_error(
+            f"{method} {url} failed: {mask_key(last_exc)}", last_exc
+        ) from last_exc
 
     # --- async ---
 
@@ -578,17 +765,17 @@ class HTTPClient:
         params: dict[str, Any] | None = None,
         json: Any = None,
         content: bytes | None = None,
-        headers: dict[str, str] | None = None,
-        timeout: float | None = None,
-        deadline: float | None = None,
+        **opts: Unpack[RequestOptions],
     ) -> ResponseEnvelope:
         url = self._build_url(path)
-        request_headers = self._merge_headers(headers, content=content)
+        call = self._resolve(opts)
+        request_headers = self._merge_headers(call.headers, content=content)
         client = self._ensure_async_client()
+        deadline = call.deadline
 
         last_exc: Exception | None = None
-        for attempt in range(self._max_retries + 1):
-            attempt_timeout = self._timeout if timeout is None else timeout
+        for attempt in range(call.max_retries + 1):
+            attempt_timeout = call.timeout
             if deadline is not None:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -618,7 +805,7 @@ class HTTPClient:
                         ) from exc
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 last_exc = exc
-                if attempt < self._max_retries and self._should_retry_transport(method, exc):
+                if attempt < call.max_retries and self._should_retry_transport(method, exc):
                     self._logger.warning(
                         "retry %s %s after %s (attempt %d)", method, url, mask_key(exc), attempt + 1
                     )
@@ -633,7 +820,7 @@ class HTTPClient:
             elapsed = time.monotonic() - started
             if (
                 self._should_retry_status(method, response.status_code)
-                and attempt < self._max_retries
+                and attempt < call.max_retries
             ):
                 await response.aread()
                 await response.aclose()
@@ -647,15 +834,27 @@ class HTTPClient:
                 await self._await(attempt, response, deadline=deadline)
                 continue
             envelope = ResponseEnvelope(response)
-            self._log_result(envelope, method, url, elapsed)
+            self._observe(
+                method=method,
+                url=url,
+                status=envelope.status_code,
+                elapsed=elapsed,
+                body=envelope.body,
+                label=self.current_label(),
+                generation_id=envelope.generation_id,
+                request_id=envelope.request_id,
+            )
             _raise_for_status(
                 envelope.status_code,
-                _error_message_from_body(envelope.status_code, envelope.body),
                 envelope.body,
+                headers=envelope.headers,
+                error_in_body=call.error_in_body,
             )
             return envelope
 
-        raise RequestError(f"{method} {url} failed: {mask_key(last_exc)}")
+        raise _transport_error(
+            f"{method} {url} failed: {mask_key(last_exc)}", last_exc
+        ) from last_exc
 
     @asynccontextmanager
     async def astream_request(
@@ -666,16 +865,16 @@ class HTTPClient:
         params: dict[str, Any] | None = None,
         json: Any = None,
         content: bytes | None = None,
-        headers: dict[str, str] | None = None,
-        timeout: float | None = None,
-    ) -> AsyncIterator[httpx.Response]:
+        **opts: Unpack[RequestOptions],
+    ) -> AsyncIterator[StreamEnvelope]:
         url = self._build_url(path)
-        request_headers = self._merge_headers(headers, content=content)
+        call = self._resolve(opts)
+        request_headers = self._merge_headers(call.headers, content=content)
         client = self._ensure_async_client()
 
         yielded = False
         last_exc: Exception | None = None
-        for attempt in range(self._max_retries + 1):
+        for attempt in range(call.max_retries + 1):
             started = time.monotonic()
             try:
                 async with client.stream(
@@ -685,11 +884,11 @@ class HTTPClient:
                     json=json,
                     content=content,
                     headers=request_headers,
-                    timeout=self._timeout if timeout is None else timeout,
+                    timeout=call.timeout,
                 ) as response:
                     if (
                         self._should_retry_status(method, response.status_code)
-                        and attempt < self._max_retries
+                        and attempt < call.max_retries
                     ):
                         await response.aread()
                         self._logger.warning(
@@ -701,39 +900,49 @@ class HTTPClient:
                         )
                         await self._await(attempt, response)
                         continue
-                    log_request(
-                        self._logger,
-                        method,
-                        url,
-                        elapsed=time.monotonic() - started,
-                        status=response.status_code,
-                    )
                     if response.status_code >= 400:
                         # read the (async) body before mapping so the sync
                         # text/json accessors work on unread streams too
                         await response.aread()
-                        message = _error_message_for_stream(response)
-                        body: Any = None
-                        try:
-                            body = _json_loads(response.text)
-                        except ValueError:
-                            body = response.text
-                        _raise_for_status(response.status_code, message, body)
+                        _raise_for_status(
+                            response.status_code,
+                            _stream_body(response),
+                            headers=response.headers,
+                        )
                     yielded = True
-                    yield response
+                    envelope = StreamEnvelope(response)
+                    try:
+                        yield envelope
+                    finally:
+                        # finally, not after the yield: a caller that breaks out
+                        # early still paid for what the stream produced.
+                        self._observe(
+                            method=method,
+                            url=url,
+                            status=response.status_code,
+                            elapsed=time.monotonic() - started,
+                            body={"usage": envelope.usage_payload, "model": envelope.model}
+                            if envelope.usage_payload
+                            else None,
+                            label=self.current_label(),
+                            streamed=True,
+                            generation_id=envelope.generation_id,
+                        )
                     return
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 if yielded:
                     raise
                 last_exc = exc
-                if attempt < self._max_retries and self._should_retry_transport(method, exc):
+                if attempt < call.max_retries and self._should_retry_transport(method, exc):
                     self._logger.warning(
                         "retry %s %s after %s (attempt %d)", method, url, mask_key(exc), attempt + 1
                     )
                     await self._await(attempt)
                     continue
                 break
-        raise RequestError(f"{method} {url} failed: {mask_key(last_exc)}")
+        raise _transport_error(
+            f"{method} {url} failed: {mask_key(last_exc)}", last_exc
+        ) from last_exc
 
     # --- helpers ---
 
@@ -743,26 +952,41 @@ class HTTPClient:
             return response.json()
         return dict(response.json())
 
-    def get(self, path: str, **kwargs: Any) -> ResponseEnvelope:
-        return self.request("GET", path, **kwargs)
+    def get(
+        self, path: str, *, params: dict[str, Any] | None = None, **opts: Unpack[RequestOptions]
+    ) -> ResponseEnvelope:
+        return self.request("GET", path, params=params, **opts)
 
-    def post(self, path: str, **kwargs: Any) -> ResponseEnvelope:
-        return self.request("POST", path, **kwargs)
+    def post(
+        self, path: str, *, json: Any = None, **opts: Unpack[RequestOptions]
+    ) -> ResponseEnvelope:
+        return self.request("POST", path, json=json, **opts)
 
-    async def aget(self, path: str, **kwargs: Any) -> ResponseEnvelope:
-        return await self.arequest("GET", path, **kwargs)
+    async def aget(
+        self, path: str, *, params: dict[str, Any] | None = None, **opts: Unpack[RequestOptions]
+    ) -> ResponseEnvelope:
+        return await self.arequest("GET", path, params=params, **opts)
 
-    async def apost(self, path: str, **kwargs: Any) -> ResponseEnvelope:
-        return await self.arequest("POST", path, **kwargs)
+    async def apost(
+        self, path: str, *, json: Any = None, **opts: Unpack[RequestOptions]
+    ) -> ResponseEnvelope:
+        return await self.arequest("POST", path, json=json, **opts)
 
     def close(self) -> None:
+        """Close the sync side. Requests after this raise RuntimeError.
+
+        Only the sync transport is affected: the async one has its own
+        lifecycle and its own :meth:`aclose`. An injected transport is never
+        closed here, but it is not silently replaced either — before this the
+        next request quietly opened a brand new pool, discarding proxy, mTLS
+        and timeout settings the caller had configured.
+        """
         if self._sync_client is not None and self._owns_sync:
             self._sync_client.close()
-        self._sync_client = None
-        self._owns_sync = True
+        self._sync_closed = True
 
     async def aclose(self) -> None:
+        """Close the async side. Requests after this raise RuntimeError."""
         if self._async_client is not None and self._owns_async:
             await self._async_client.aclose()
-        self._async_client = None
-        self._owns_async = True
+        self._async_closed = True

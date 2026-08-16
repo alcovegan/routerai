@@ -1,0 +1,23 @@
+{
+  "name": "rerank_ok",
+  "note": "Переранжирование: usage состоит из search_units, поля cost нет",
+  "finding": "08",
+  "recorded_from": "https://routerai.ru/api/v1",
+  "request": {
+    "method": "POST",
+    "path": "/rerank",
+    "body": {
+      "model": "cohere/rerank-4-pro",
+      "query": "погода в москве",
+      "documents": [
+        "Прогноз погоды в Москве",
+        "Рецепт борща"
+      ]
+    }
+  },
+  "response": {
+    "status": 200,
+    "content_type": "application/json",
+    "body": "{\"id\":\"rai-rerank-1786734025-WljoLqM0qsd0t6OrdSLW\",\"model\":\"rerank-v4.0-pro\",\"results\":[{\"index\":0,\"relevance_score\":0.9095782,\"document\":{\"text\":\"Прогноз погоды в Москве\"}},{\"index\":1,\"relevance_score\":0.3429895,\"document\":{\"text\":\"Рецепт борща\"}}],\"usage\":{\"search_units\":1},\"provider\":\"Cohere\"}"
+  }
+}

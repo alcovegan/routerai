@@ -1,0 +1,16 @@
+{
+  "name": "auth_401",
+  "note": "401 на управляющем эндпоинте: тип ошибки без status_code и body",
+  "finding": "05, 22",
+  "recorded_from": "https://routerai.ru/api/v1",
+  "request": {
+    "method": "GET",
+    "path": "/keys",
+    "body": null
+  },
+  "response": {
+    "status": 401,
+    "content_type": "application/json",
+    "body": "{\"error\":\"401 Unauthorized\"}"
+  }
+}

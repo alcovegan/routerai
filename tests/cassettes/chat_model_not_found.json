@@ -1,0 +1,25 @@
+{
+  "name": "chat_model_not_found",
+  "note": "Ошибка 400: тело вида {\"error\": \"строка\"}",
+  "finding": "03",
+  "recorded_from": "https://routerai.ru/api/v1",
+  "request": {
+    "method": "POST",
+    "path": "/chat/completions",
+    "body": {
+      "model": "no-such/model-xyz",
+      "messages": [
+        {
+          "role": "user",
+          "content": "hi"
+        }
+      ],
+      "max_tokens": 5
+    }
+  },
+  "response": {
+    "status": 400,
+    "content_type": "application/json",
+    "body": "{\"error\":\"Model 'no-such/model-xyz' not found\"}"
+  }
+}

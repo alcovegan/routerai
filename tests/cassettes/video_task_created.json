@@ -1,0 +1,22 @@
+{
+  "name": "video_task_created",
+  "note": "Создание задачи: HTTP 202, плоское тело без конверта data",
+  "finding": "10",
+  "recorded_from": "https://routerai.ru/api/v1",
+  "request": {
+    "method": "POST",
+    "path": "/videos",
+    "body": {
+      "model": "bytedance/seedance-2.0-mini",
+      "prompt": "…",
+      "duration": 4,
+      "resolution": "480p",
+      "generate_audio": false
+    }
+  },
+  "response": {
+    "status": 202,
+    "content_type": "application/json",
+    "body": "{\"id\": \"8NnkHVnoPapWvgOPCp5z\", \"polling_url\": \"https://routerai.ru/api/v1/videos/8NnkHVnoPapWvgOPCp5z\", \"status\": \"pending\"}"
+  }
+}
