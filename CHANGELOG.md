@@ -6,12 +6,13 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.3.0] - 2026-08-16
+## [0.3.0] - 2026-09-03
 
-First published as `0.3.0rc1`. Versions 0.2.0 and 0.3.0 were developed
-together after an audit of the SDK against the live API; 0.2.0 is described
-separately below because its changes are breaking and worth reading on their
-own, but it was never released to PyPI.
+Published as `0.3.0rc1` on 2026-08-16 and promoted to a stable release
+unchanged. Versions 0.2.0 and 0.3.0 were developed together after an audit of
+the SDK against the live API; 0.2.0 is described separately below because its
+changes are breaking and worth reading on their own, but it was never released
+to PyPI.
 
 ### Added
 
