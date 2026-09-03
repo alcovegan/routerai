@@ -19,6 +19,9 @@ Python wrapper for the [RouterAI](https://routerai.ru) API — unified access to
 - Typed errors that agree with themselves: every server answer is an
   `APIStatusError` subclass carrying `.status_code`, and a provider failure
   wrapped in HTTP 200 still raises `RateLimitError`
+- Provider pinning through the model string (`route(model, provider=...,
+  allow_fallbacks=False)`) and model aliases (`~developer/line-latest`) that follow the
+  newest release; spend stays filed under the model you asked for
 - Models catalog: listing, client-side search, grouping by capabilities (text, reasoning,
   vision, image/video/audio generation, speech, transcription, embeddings, rerank, tools)
 - Post-hoc cost lookup by generation id (`X-Generation-Id`)
@@ -66,6 +69,52 @@ pricing.is_free()                   # False
 client.models.search(max_price_prompt=1.0)
 client.models.endpoints("anthropic/claude-sonnet-5")  # providers + prices
 ```
+
+### Provider routing and model aliases
+
+Two things ride along in the model string. A `@` suffix pins the request to one
+provider without touching the request body; a leading `~` marks an alias that
+always resolves to the newest release in a line.
+
+```python
+from routerai import route
+
+# Pin a provider. allow_fallbacks=False turns a silent switch to another
+# provider into a NotFoundError, which is the whole point of pinning.
+client.chat.complete(
+    route("anthropic/claude-opus-5", provider="amazon-bedrock", allow_fallbacks=False),
+    "hello",
+)
+
+# An alias follows the newest release without a config change on your side.
+client.chat.complete("~anthropic/claude-sonnet-latest", "hello")
+
+client.models.aliases()                             # every alias in the catalog
+client.models.resolve("~anthropic/claude-sonnet-latest")   # what it points at today
+client.models.search("claude", aliases="exclude")   # concrete releases only
+```
+
+Worth knowing before you rely on either:
+
+- The `@` suffix is understood only by `chat.complete`/`chat.stream`. Other
+  endpoints read the whole string as a model name and answer
+  `400 Model '...@provider=x' not found`.
+- Setting `provider` both in the string and in the `provider=` argument is a
+  `400` from the server. The SDK raises `ConfigurationError` before spending
+  the request.
+- An alias is marked by the `~` prefix, nothing else. `openai/gpt-chat-latest`
+  is an ordinary model despite the suffix.
+- The catalog gives an alias no pointer back to its target — the entry is
+  shaped exactly like any other — so `resolve()` matches on `name`, which an
+  alias inherits from the release it stands for.
+- `cheapest()` leaves aliases out by default: an alias carries its target's
+  price, so including them only adds a tie whose winner depends on id
+  ordering. Pass `aliases="include"` if you want a floating id.
+- Spend is filed under the model you asked for, not the name the server echoes
+  back. The two differ more often than you would expect: an alias comes back
+  resolved, and some providers answer with a short name that is in no catalog
+  at all (`deepseek/deepseek-v4-flash-0731` is served as `deepseek-v4-flash`).
+  `UsageRecord.model` still carries what the server said.
 
 ### Several API keys
 

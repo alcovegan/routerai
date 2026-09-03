@@ -1,0 +1,30 @@
+{
+  "name": "chat_route_conflict_400",
+  "note": "provider задан и в строке модели, и в теле запроса — сервер отвечает 400 с текстом про конфликт. SDK ловит это до отправки",
+  "finding": "роутинг и алиасы (0.4.0)",
+  "recorded_from": "https://routerai.ru/api/v1",
+  "request": {
+    "method": "POST",
+    "path": "/chat/completions",
+    "body": {
+      "model": "mistralai/mistral-nemo@provider=deepinfra",
+      "messages": [
+        {
+          "role": "user",
+          "content": "1+1?"
+        }
+      ],
+      "max_tokens": 5,
+      "provider": {
+        "only": [
+          "deepinfra"
+        ]
+      }
+    }
+  },
+  "response": {
+    "status": 400,
+    "content_type": "application/json",
+    "body": "{\"error\":\"Parameter 'provider' specified both in model string and request body (provider.only)\"}"
+  }
+}

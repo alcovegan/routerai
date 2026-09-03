@@ -88,6 +88,7 @@ ignore = ["E501"]
 "tests/test_usage.py" = ["RUF001", "RUF002"]
 "tests/test_tools.py" = ["RUF001", "RUF002"]
 "tests/test_parity.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_routing.py" = ["RUF001", "RUF002"]
 "tests/cassettes/__init__.py" = ["RUF002"]
 
 [tool.mypy]

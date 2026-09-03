@@ -1,3 +1,4 @@
+from ._routing import ModelRoute, is_alias, route, split_model
 from ._version import __version__
 from .client import RouterAI
 from .errors import (
@@ -97,6 +98,7 @@ __all__ = [
     "ModelDetail",
     "ModelNotFoundError",
     "ModelPricing",
+    "ModelRoute",
     "NoProviderError",
     "NotFoundError",
     "ParsedResult",
@@ -131,7 +133,10 @@ __all__ = [
     "VideoTask",
     "WebhookVerificationError",
     "__version__",
+    "is_alias",
+    "route",
     "signing_secret",
+    "split_model",
     "tool_schema",
     "verify_video",
 ]

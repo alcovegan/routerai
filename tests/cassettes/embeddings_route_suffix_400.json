@@ -1,0 +1,19 @@
+{
+  "name": "embeddings_route_suffix_400",
+  "note": "@-синтаксис на эндпоинте, который его не поддерживает: вся строка читается как имя модели, ответ 400 Model '...@provider=...' not found",
+  "finding": "роутинг и алиасы (0.4.0)",
+  "recorded_from": "https://routerai.ru/api/v1",
+  "request": {
+    "method": "POST",
+    "path": "/embeddings",
+    "body": {
+      "model": "deepvk/USER-bge-m3@provider=deepinfra",
+      "input": "тест"
+    }
+  },
+  "response": {
+    "status": 400,
+    "content_type": "application/json",
+    "body": "{\"error\":\"Model 'deepvk/USER-bge-m3@provider=deepinfra' not found\"}"
+  }
+}

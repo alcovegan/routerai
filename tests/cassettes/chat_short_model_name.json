@@ -1,0 +1,25 @@
+{
+  "name": "chat_short_model_name",
+  "note": "deepseek/deepseek-v4-flash-0731 отвечает коротким именем deepseek-v4-flash, которого нет в каталоге. Не свойство алиаса: тот же ответ на канонический id",
+  "finding": "роутинг и алиасы (0.4.0)",
+  "recorded_from": "https://routerai.ru/api/v1",
+  "request": {
+    "method": "POST",
+    "path": "/chat/completions",
+    "body": {
+      "model": "deepseek/deepseek-v4-flash-0731",
+      "messages": [
+        {
+          "role": "user",
+          "content": "1+1?"
+        }
+      ],
+      "max_tokens": 5
+    }
+  },
+  "response": {
+    "status": 200,
+    "content_type": "application/json",
+    "body": "\n         \n{\"id\":\"rai-1788455928-700DOJgC7qWYeRvwsG5U\",\"object\":\"chat.completion\",\"created\":1788455928,\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning\":\"We need answer simple.\"},\"logprobs\":null,\"finish_reason\":\"length\"}],\"usage\":{\"total_tokens\":92,\"prompt_tokens\":87,\"prompt_tokens_details\":{\"cached_tokens\":0},\"completion_tokens\":5,\"completion_tokens_details\":{\"reasoning_tokens\":5},\"cost\":0.00279164166996},\"system_fingerprint\":\"a26a7955944dc5c60445bff77fac9c8e\",\"provider\":\"DeepSeek\"}"
+  }
+}

@@ -6,6 +6,44 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-03
+
+RouterAI added two ways to say which model you want, and both ride inside the
+model string. Verified against the live API before implementing: the recorded
+exchanges are in `tests/cassettes/`.
+
+### Added
+
+- `route(model, provider=..., allow_fallbacks=False)` builds the `@` suffix
+  that pins a request to one provider without touching the request body.
+  `split_model()` takes such a string apart, `ModelRoute` describes the parts,
+  and both are exported.
+- Model aliases: `Model.is_alias`, `client.models.aliases()`/`aaliases()`, and
+  `client.models.resolve()`/`aresolve()` for the release an alias points at
+  today. `search()` takes `aliases="include"|"exclude"|"only"`.
+- `UsageRecord.requested_model` — the model the caller asked for, kept next to
+  the one the server billed.
+
+### Fixed
+
+- Spend is grouped by the model the caller asked for instead of the name the
+  server echoes back. The two disagree more often than expected: an alias comes
+  back already resolved, and some providers answer with a short name that is in
+  no catalog (`deepseek/deepseek-v4-flash-0731` is served as
+  `deepseek-v4-flash`), which put one model under two headings and produced
+  rows that matched nothing in the catalog.
+- Routing variants of one model no longer split its spend: the `@` suffix is
+  stripped before grouping.
+- `Model.author` and `Model.slug` ignore the alias marker, so
+  `developer="anthropic"` matches `~anthropic/claude-opus-latest` too. Before
+  this, a developer filter silently dropped every alias.
+- Setting `provider` both in the model string and in the `provider=` argument
+  raises `ConfigurationError` locally instead of spending a request to be told
+  `400` by the server.
+- `models.endpoints()` raises `ModelNotFoundError` for an id with no `/` in it,
+  where it used to let a bare `ValueError` out of the SDK.
+
+
 ## [0.3.0] - 2026-09-03
 
 Published as `0.3.0rc1` on 2026-08-16 and promoted to a stable release
