@@ -1,0 +1,25 @@
+{
+  "name": "chat_alias_resolved",
+  "note": "Запрос алиасом ~z-ai/glm-flash-latest: сервер отвечает каноническим id цели z-ai/glm-5.3-flash. Алиас в поле model ответа не сохраняется",
+  "finding": "роутинг и алиасы (0.4.0)",
+  "recorded_from": "https://routerai.ru/api/v1",
+  "request": {
+    "method": "POST",
+    "path": "/chat/completions",
+    "body": {
+      "model": "~z-ai/glm-flash-latest",
+      "messages": [
+        {
+          "role": "user",
+          "content": "1+1?"
+        }
+      ],
+      "max_tokens": 5
+    }
+  },
+  "response": {
+    "status": 200,
+    "content_type": "application/json",
+    "body": "\n         \n\n         \n\n         \n\n         \n\n         \n{\"choices\":[{\"finish_reason\":\"length\",\"index\":0,\"logprobs\":null,\"message\":{\"content\":\"\",\"reasoning\":\"Simple question: 1\",\"reasoning_details\":[{\"format\":\"unknown\",\"index\":0,\"text\":\"Simple question: 1\",\"type\":\"reasoning.text\"}],\"refusal\":null,\"role\":\"assistant\"}}],\"created\":1788455931,\"id\":\"rai-1788455929-rteqlTcw3E7MxoQxbiZg\",\"model\":\"z-ai/glm-5.3-flash\",\"object\":\"chat.completion\",\"system_fingerprint\":null,\"usage\":{\"total_tokens\":18,\"prompt_tokens\":0,\"prompt_tokens_details\":{\"audio_tokens\":0,\"cached_tokens\":0},\"completion_tokens\":5,\"completion_tokens_details\":{\"audio_tokens\":0,\"image_tokens\":0,\"reasoning_tokens\":0,\"text_tokens\":5},\"cost\":0.00015550588625}}"
+  }
+}
