@@ -14,7 +14,13 @@ from pydantic import BaseModel, ValidationError
 from .._errors import DONE_MARKER, parse_stream_event
 from .._extras import merge_extra as _merge_extra
 from .._options import RequestOptions, Unpack
-from ..errors import ResponseParsingError, RouterAIError, StreamInterruptedError
+from .._routing import conflicting_keys
+from ..errors import (
+    ConfigurationError,
+    ResponseParsingError,
+    RouterAIError,
+    StreamInterruptedError,
+)
 from ..schemas import ChatResult, ProviderSelection, ServiceTier, ToolCall, Usage
 from ..tools import (
     ToolFunction,
@@ -173,6 +179,12 @@ class Chat:
         extra: dict[str, Any] | None,
     ) -> dict[str, Any]:
         _merge_extra(extra, reserved=RESERVED_BODY_KEYS)
+        clashes = conflicting_keys(model, provider)
+        if clashes:
+            raise ConfigurationError(
+                f"{', '.join(clashes)} set both in the model string and in provider=; "
+                "RouterAI rejects that with 400. Keep one of the two."
+            )
         body: dict[str, Any] = {"model": model, "messages": _messages(prompt, system)}
         if max_tokens is not None:
             body["max_tokens"] = max_tokens

@@ -499,6 +499,7 @@ class HTTPClient:
         streamed: bool = False,
         generation_id: str | None = None,
         request_id: str | None = None,
+        payload: Any = None,
     ) -> None:
         """Account for one request, then log it.
 
@@ -513,9 +514,11 @@ class HTTPClient:
                 self._counted_generations[generation_id] = None
                 if len(self._counted_generations) > 4096:
                     self._counted_generations.popitem(last=False)
+        requested_model = payload.get("model") if isinstance(payload, Mapping) else None
         record = record_from(
             method=method,
             path=url,
+            requested_model=requested_model if isinstance(requested_model, str) else None,
             status=status,
             elapsed=elapsed,
             body=body,
@@ -649,6 +652,7 @@ class HTTPClient:
                 elapsed=elapsed,
                 body=envelope.body,
                 label=self.current_label(),
+                payload=json,
                 generation_id=envelope.generation_id,
                 request_id=envelope.request_id,
             )
@@ -736,6 +740,7 @@ class HTTPClient:
                             if envelope.usage_payload
                             else None,
                             label=self.current_label(),
+                            payload=json,
                             streamed=True,
                             generation_id=envelope.generation_id,
                         )
@@ -841,6 +846,7 @@ class HTTPClient:
                 elapsed=elapsed,
                 body=envelope.body,
                 label=self.current_label(),
+                payload=json,
                 generation_id=envelope.generation_id,
                 request_id=envelope.request_id,
             )
@@ -925,6 +931,7 @@ class HTTPClient:
                             if envelope.usage_payload
                             else None,
                             label=self.current_label(),
+                            payload=json,
                             streamed=True,
                             generation_id=envelope.generation_id,
                         )

@@ -19,6 +19,7 @@ from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from typing import Any
 
+from ._routing import split_model
 from .schemas import Usage
 
 UsageHook = Callable[["UsageRecord"], None]
@@ -38,6 +39,20 @@ class UsageRecord:
     status: int | None
     elapsed: float
     model: str | None = None
+    """The model the server billed, as it named it in the response."""
+
+    requested_model: str | None = None
+    """The model the caller asked for, routing suffix removed.
+
+    Kept separately because the two do not always agree. An alias is resolved
+    by the server, so asking for ``~z-ai/glm-flash-latest`` is answered as
+    ``z-ai/glm-5.3-flash``; and some providers echo a short name that is in no
+    catalog at all — ``deepseek/deepseek-v4-flash-0731`` comes back as plain
+    ``deepseek-v4-flash``. Grouping spend by the served name alone would file
+    one model under two headings and leave rows that match nothing in the
+    catalog.
+    """
+
     label: str | None = None
     streamed: bool = False
     duplicate: bool = False
@@ -96,9 +111,18 @@ def _add(stats: UsageStats, record: UsageRecord, *, grouped: bool = False) -> Us
         return updated
     return replace(
         updated,
-        by_model=_grouped(dict(stats.by_model), record.model, record),
+        by_model=_grouped(dict(stats.by_model), _model_key(record), record),
         by_label=_grouped(dict(stats.by_label), record.label, record),
     )
+
+
+def _model_key(record: UsageRecord) -> str | None:
+    """Which name a request is filed under in ``by_model``.
+
+    The caller's own string wins: it is what they wrote, it matches the
+    catalog, and it stays stable when an alias starts pointing somewhere new.
+    """
+    return record.requested_model or record.model
 
 
 def _grouped(
@@ -164,6 +188,7 @@ def record_from(
     generation_id: str | None = None,
     request_id: str | None = None,
     duplicate: bool = False,
+    requested_model: str | None = None,
 ) -> UsageRecord:
     """Build a record from a decoded response body."""
     usage: Usage | None = None
@@ -187,6 +212,7 @@ def record_from(
         status=status,
         elapsed=elapsed,
         model=model,
+        requested_model=split_model(requested_model).model if requested_model else None,
         label=label,
         streamed=streamed,
         duplicate=duplicate,

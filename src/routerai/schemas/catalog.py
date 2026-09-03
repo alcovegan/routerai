@@ -6,6 +6,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .._routing import ALIAS_PREFIX
+
 MILLION = Decimal("1000000")
 
 
@@ -144,12 +146,29 @@ class Model(BaseModel):
         return value or []
 
     @property
+    def is_alias(self) -> bool:
+        """Whether this entry is an alias for the newest release in a line.
+
+        Aliases look exactly like ordinary entries — same fields, real pricing,
+        and a ``name`` describing whatever they currently point at. The leading
+        ``~`` is the only thing that marks one. A ``-latest`` suffix does not:
+        ``openai/gpt-chat-latest`` is a normal model.
+        """
+        return self.id.startswith(ALIAS_PREFIX)
+
+    @property
     def author(self) -> str:
-        return self.id.split("/", 1)[0]
+        """The developer part of the id, without the alias marker.
+
+        Stripping ``~`` here keeps ``developer="anthropic"`` matching both
+        ``anthropic/claude-opus-5`` and ``~anthropic/claude-opus-latest``.
+        """
+        return self.id.lstrip(ALIAS_PREFIX).split("/", 1)[0]
 
     @property
     def slug(self) -> str:
-        return self.id.split("/", 1)[1] if "/" in self.id else self.id
+        base = self.id.lstrip(ALIAS_PREFIX)
+        return base.split("/", 1)[1] if "/" in base else base
 
     @property
     def capabilities(self) -> set[Capability]:

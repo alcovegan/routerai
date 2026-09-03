@@ -5,8 +5,9 @@ import threading
 import time
 from collections.abc import Iterable
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
+from .._routing import is_alias, split_model
 from ..errors import ModelNotFoundError
 from ..schemas import Capability, Model, ModelDetail
 
@@ -16,6 +17,22 @@ if TYPE_CHECKING:
 _DEFAULT_TTL = 600.0
 
 ModelList = list[Model]
+
+AliasFilter = Literal["include", "exclude", "only"]
+"""What to do with alias entries: keep them, drop them, or return only them."""
+
+
+def _split_id(model_id: str) -> tuple[str, str]:
+    """Split a catalog id into author and slug, alias marker kept.
+
+    The marker stays because RouterAI serves alias paths as-is:
+    ``GET /models/~deepseek/deepseek-v4-flash-latest/endpoints`` answers 200.
+    """
+    base = split_model(model_id).model
+    author, separator, slug = base.partition("/")
+    if not separator or not slug:
+        raise ModelNotFoundError(f"model id {model_id!r} is not in '<developer>/<model>' form")
+    return author, slug
 
 
 class Models:
@@ -125,6 +142,7 @@ class Models:
         max_price_completion: float | None = None,
         reasoning: bool | None = None,
         tools: bool | None = None,
+        aliases: AliasFilter = "include",
     ) -> ModelList:
         """Client-side search over the catalog.
 
@@ -136,6 +154,10 @@ class Models:
             min_context: minimal context length in tokens.
             max_price_prompt/max_price_completion: max price in rubles per 1M tokens.
             reasoning/tools: shortcuts for capability filters.
+            aliases: "include" (default) keeps alias entries like
+                ``~anthropic/claude-opus-latest`` alongside the concrete
+                releases they point at, "exclude" drops them, "only" returns
+                just the aliases.
         """
         return filter_models(
             self.all(),
@@ -149,6 +171,7 @@ class Models:
             max_price_completion=max_price_completion,
             reasoning=reasoning,
             tools=tools,
+            aliases=aliases,
         )
 
     async def asearch(
@@ -164,6 +187,7 @@ class Models:
         max_price_completion: float | None = None,
         reasoning: bool | None = None,
         tools: bool | None = None,
+        aliases: AliasFilter = "include",
     ) -> ModelList:
         """Async :meth:`search` — the sync one blocks the event loop on refresh."""
         return filter_models(
@@ -178,6 +202,7 @@ class Models:
             max_price_completion=max_price_completion,
             reasoning=reasoning,
             tools=tools,
+            aliases=aliases,
         )
 
     # --- capabilities ---
@@ -261,6 +286,7 @@ class Models:
         developer: str | None = None,
         unit: str = "blended",
         exclude: Iterable[str] = (),
+        aliases: AliasFilter = "exclude",
     ) -> Model:
         """The cheapest model matching the filters.
 
@@ -275,6 +301,7 @@ class Models:
             developer=developer,
             unit=unit,
             exclude=exclude,
+            aliases=aliases,
         )
 
     async def acheapest(
@@ -285,6 +312,7 @@ class Models:
         developer: str | None = None,
         unit: str = "blended",
         exclude: Iterable[str] = (),
+        aliases: AliasFilter = "exclude",
     ) -> Model:
         return pick_cheapest(
             await self.aall(),
@@ -293,22 +321,57 @@ class Models:
             developer=developer,
             unit=unit,
             exclude=exclude,
+            aliases=aliases,
         )
+
+    # --- aliases ---
+
+    def aliases(self) -> ModelList:
+        """Alias entries in the catalog: ids that follow the newest release.
+
+        An alias looks like ``~anthropic/claude-opus-latest``; its ``name``
+        describes whatever it currently points at.
+        """
+        return filter_models(self.all(), aliases="only")
+
+    async def aaliases(self) -> ModelList:
+        """Async :meth:`aliases`."""
+        return filter_models(await self.aall(), aliases="only")
+
+    def resolve(self, model_id: str) -> Model:
+        """The concrete model an alias currently points at.
+
+        A non-alias id resolves to itself, so this is safe to call on anything
+        a caller might pass. Any ``@`` routing suffix is ignored.
+
+        The catalog gives an alias no pointer back to its target — the entry is
+        shaped exactly like an ordinary one — so the match is made on ``name``,
+        which an alias inherits from the release it stands for.
+        """
+        return _resolve_alias(self.all(), model_id)
+
+    async def aresolve(self, model_id: str) -> Model:
+        """Async :meth:`resolve`."""
+        return _resolve_alias(await self.aall(), model_id)
 
     # --- endpoints ---
 
     def endpoints(self, model_id: str) -> ModelDetail:
-        """Provider endpoints for a model: slugs, prices, limits, status."""
-        author, slug = model_id.split("/", 1)
+        """Provider endpoints for a model: slugs, prices, limits, status.
+
+        Accepts an alias too; the server answers for the release it points at
+        while echoing the alias id back.
+        """
+        author, slug = _split_id(model_id)
         response = self._http.get(f"models/{author}/{slug}/endpoints")
         return ModelDetail.model_validate(response.json()["data"])
 
     async def aendpoints(self, model_id: str) -> ModelDetail:
-        author, slug = model_id.split("/", 1)
+        author, slug = _split_id(model_id)
         response = await self._http.aget(f"models/{author}/{slug}/endpoints")
         return ModelDetail.model_validate(response.json()["data"])
 
-    # --- aliases (real methods so type checkers see them) ---
+    # --- method aliases (real methods so type checkers see them) ---
 
     def list(self, *, force_refresh: bool = False) -> ModelList:
         """Alias for :meth:`all`."""
@@ -327,6 +390,28 @@ def group_by_capability(models: ModelList) -> dict[Capability, ModelList]:
     return {cap: found for cap, found in grouped.items() if found}
 
 
+def _resolve_alias(models: ModelList, model_id: str) -> Model:
+    """Resolve an alias id against a fetched catalog. Pure function: no I/O."""
+    wanted = split_model(model_id).model
+    entry = next((m for m in models if m.id == wanted), None)
+    if entry is None:
+        raise ModelNotFoundError(f"model {wanted!r} not found in catalog")
+    if not is_alias(wanted):
+        return entry
+
+    targets = [m for m in models if not m.is_alias and m.name == entry.name]
+    if len(targets) == 1:
+        return targets[0]
+    if not targets:
+        raise ModelNotFoundError(
+            f"alias {wanted!r} points at {entry.name!r}, which is not in the catalog"
+        )
+    raise ModelNotFoundError(
+        f"alias {wanted!r} points at {entry.name!r}, which matches several "
+        f"catalog entries: {sorted(m.id for m in targets)}"
+    )
+
+
 def pick_cheapest(
     models: ModelList,
     *,
@@ -335,11 +420,23 @@ def pick_cheapest(
     developer: str | None = None,
     unit: str = "blended",
     exclude: Iterable[str] = (),
+    aliases: AliasFilter = "exclude",
 ) -> Model:
-    """Cheapest model matching the filters, with deterministic tie-breaking."""
+    """Cheapest model matching the filters, with deterministic tie-breaking.
+
+    Aliases are left out by default. An alias carries the same price as the
+    release it points at, so including them adds a duplicate of some model at
+    exactly the tying price — and which of the two wins would then depend on
+    id ordering rather than on anything the caller asked for. Pass
+    ``aliases="include"`` to accept an id that follows the newest release.
+    """
     skip = set(exclude)
     candidates = filter_models(
-        models, capabilities=capabilities, min_context=min_context, developer=developer
+        models,
+        capabilities=capabilities,
+        min_context=min_context,
+        developer=developer,
+        aliases=aliases,
     )
     scored: list[tuple[Decimal, int, str, Model]] = []
     for model in candidates:
@@ -386,6 +483,7 @@ def filter_models(
     max_price_completion: float | None = None,
     reasoning: bool | None = None,
     tools: bool | None = None,
+    aliases: AliasFilter = "include",
 ) -> ModelList:
     """Filter a catalog. Pure function: no I/O, usable on an already fetched list."""
     caps = _normalize_capabilities(capabilities)
@@ -396,6 +494,10 @@ def filter_models(
 
     results: list[Model] = []
     for model in models:
+        if aliases == "exclude" and model.is_alias:
+            continue
+        if aliases == "only" and not model.is_alias:
+            continue
         if q and not _matches_query(model, q.lower()):
             continue
         if developer and model.author.lower() != developer.lower():
